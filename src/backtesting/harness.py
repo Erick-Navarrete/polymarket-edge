@@ -36,6 +36,22 @@ class BacktestResult:
         if self.total_trades > 0:
             self.win_rate = self.winning_trades / self.total_trades
 
+    def calculate_sharpe(self) -> None:
+        """Calculate annualized Sharpe ratio from trade PnLs."""
+        if len(self.trades) < 2:
+            self.sharpe_ratio = 0.0
+            return
+        import statistics
+
+        pnls = [float(Decimal(str(t.get("pnl", "0")))) for t in self.trades]
+        mean_pnl = statistics.mean(pnls)
+        std_pnl = statistics.stdev(pnls)
+        if std_pnl == 0:
+            self.sharpe_ratio = 0.0
+            return
+        # Annualize assuming 252 trading days, ~4 trades/day
+        self.sharpe_ratio = (mean_pnl / std_pnl) * (252 * 4) ** 0.5
+
     def summary(self) -> dict[str, Any]:
         return {
             "strategy": self.strategy_name,
