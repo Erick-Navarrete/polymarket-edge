@@ -45,7 +45,6 @@ These are vetted open-source repos that inform our architecture:
 | `MrFadiAi/Polymarket-bot` | 4-strategy TS bot with risk management | 36 | Clean risk layering, dry-run toggle |
 | `echandsome/Polymarket-betting-bot` | Copy trading + odds-based strategies | 90 | TypeScript, MongoDB, encrypted keys |
 | `aulekator/Polymarket-BTC-15-Minute-Trading-Bot` | BTC 15m NautilusTrader bot | 257 | Multi-signal fusion, self-learning weights |
-| `pmxt-dev/pmxt` | Unified prediction market API (CCXT equivalent) | 1.7k | Python + TS SDK, supports 10+ exchanges |
 
 ## Security Warnings
 
@@ -54,6 +53,7 @@ These are vetted open-source repos that inform our architecture:
 - **Never commit `.env` files** — private key exfiltration is the #1 attack vector in this space
 - **Rotate keys immediately** if you ever ran untrusted Polymarket bot code
 - **Audit all dependencies** — legit repos can be compromised via dependency chain attacks
+- **Do NOT use pmxt** — unofficial package requiring insecure Node.js sidecar; removed for security (see docs/security_audit.md)
 
 ## Project Structure (Planned)
 
@@ -89,6 +89,7 @@ polymarket-edge/
 - All strategies must implement a common `Strategy` interface with `on_data()`, `on_fill()`, `start()`, `stop()`
 - Every trade must pass through `risk_manager.approve()` before execution
 - Paper mode is the default; `LIVE_MODE=true` in `.env` enables real execution
+- Shadow mode (`SHADOW_MODE=true`) uses live data feeds but paper-trades only
 - All network calls must have timeouts and retry logic with exponential backoff
 - Logging uses structured JSON format for Grafana ingestion
 - No strategy may exceed the global position limit or daily loss cap

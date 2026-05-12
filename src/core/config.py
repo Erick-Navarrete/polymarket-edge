@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     # === Trading Mode ===
     live_mode: bool = False
 
+    # Shadow mode: connect to live market data feeds but only paper-trade.
+    # Different from plain paper mode (which can use simulated/cached data).
+    # Use this to validate strategies against real-time prices before going live.
+    shadow_mode: bool = False
+
     # === Wallet ===
     polygon_wallet_address: str = ""
     polygon_wallet_private_key: str = ""

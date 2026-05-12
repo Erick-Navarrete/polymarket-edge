@@ -5,6 +5,7 @@ description = "Modular Polymarket predictive trading platform with multiple stra
 requires-python = ">=3.11"
 dependencies = [
     "py-clob-client>=0.1.0",
+    "prometheus-client>=0.20",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "nautilus_trader>=1.225.0",

@@ -6,7 +6,8 @@ from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
+from prometheus_client import generate_latest
 import asyncio
 import json
 
@@ -34,7 +35,9 @@ def get_engine() -> Engine:
 
 @app.get("/")
 async def root():
-    return {"name": "Polymarket Edge", "version": "0.1.0", "mode": "LIVE" if get_engine().settings.live_mode else "PAPER"}
+    engine = get_engine()
+    mode = "LIVE" if engine.settings.live_mode else ("SHADOW" if engine.settings.shadow_mode else "PAPER")
+    return {"name": "Polymarket Edge", "version": "0.1.0", "mode": mode}
 
 
 @app.get("/api/strategies")
@@ -127,6 +130,12 @@ async def websocket_endpoint(websocket: WebSocket):
             await asyncio.sleep(2)
     except WebSocketDisconnect:
         pass
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+async def metrics():
+    """Prometheus metrics endpoint."""
+    return generate_latest().decode()
 
 
 # Serve React frontend in production (built files from frontend/dist/)

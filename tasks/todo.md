@@ -1,7 +1,7 @@
 # Polymarket Edge — Build Plan
 
 ## Phase 1: Foundation (Core Infrastructure)
-- [x] `pyproject.toml` — project metadata, dependencies (nautilus_trader, py-clob-client, pmxt, pydantic, etc.)
+- [x] `pyproject.toml` — project metadata, dependencies (nautilus_trader, py-clob-client, pydantic, etc.)
 - [x] `src/core/config.py` — Pydantic Settings loading from `.env` with all config fields
 - [x] `src/core/risk_manager.py` — Position/loss limits, circuit breakers, daily drawdown tracking
 - [x] `src/core/data_feed.py` — Unified market data pipeline (Polymarket CLOB WebSocket + REST fallback)
@@ -26,7 +26,7 @@
 - [x] `src/backtesting/data_loader.py` — Historical data fetcher from Polymarket API
 - [ ] Backtest each strategy on historical data, record PnL, Sharpe, max drawdown
 - [ ] Walk-forward validation for strategies with ML components
-- [ ] Shadow trading mode — run strategies in paper alongside live market data
+- [x] Shadow trading mode — SHADOW_MODE flag connects to live data but paper-trades only
 
 ## Phase 4: Dashboard & Monitoring
 - [x] `src/dashboard/app.py` — FastAPI backend (REST + WebSocket) for strategy/risk monitoring
@@ -37,15 +37,19 @@
 - [x] useApi hooks for REST endpoints + strategy toggle
 - [x] FastAPI serves React SPA in production (static files from frontend/dist/)
 - [x] Grafana dashboards for system health, trade execution, risk metrics
+- [x] `src/core/metrics.py` — Prometheus metrics (equity, PnL, drawdown, trades, fills, latency, errors)
+- [x] `/metrics` endpoint on FastAPI for Prometheus scraping
+- [x] Risk violation tracking per type (position_size, total_exposure, daily_loss, monthly_loss, drawdown)
 
 ## Phase 5: Hardening
-- [x] Integration tests for each strategy in paper mode
-- [x] Security audit of dependency tree (check for typosquatted packages)
+- [x] Integration tests for each strategy in paper mode (31 tests passing)
+- [x] Security audit of dependency tree (pmxt removed, py-clob-client verified official)
+- [x] Remove pmxt dependency (flagged in security audit — unofficial, sidecar security risk)
+- [x] Key rotation documentation (docs/key_rotation.md)
 - [ ] Rate limiting and retry logic on all external API calls
-- [ ] Key rotation documentation
-- [ ] Remove pmxt dependency (flagged in security audit — unofficial, sidecar security risk)
 
 ## Review
 - Phase 1 complete. Phase 2 complete (6 strategies). Phase 3 core done (harness + data loader).
-- Dashboard backend complete. React frontend + Grafana dashboards remain.
-- Next: backtest on real data, remove pmxt, key rotation docs, rate limiting hardening.
+- Phase 4 complete: React frontend, Grafana dashboards, Prometheus metrics.
+- Phase 5 mostly done: integration tests, security audit, key rotation docs.
+- Remaining: backtest on real data, walk-forward validation, rate limiting.

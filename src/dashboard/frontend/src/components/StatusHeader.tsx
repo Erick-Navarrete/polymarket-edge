@@ -7,18 +7,16 @@ interface Props {
 }
 
 export default function StatusHeader({ status, risk, wsConnected }: Props) {
-  const mode = status?.mode ?? '—'
-  const isLive = mode === 'LIVE'
+  const mode = status?.mode ?? '——'
+  const modeBg = mode === 'LIVE' ? 'bg-red-500/20 text-red-400'
+    : mode === 'SHADOW' ? 'bg-amber-500/20 text-amber-400'
+    : 'bg-emerald-500/20 text-emerald-400'
 
   return (
     <header className="flex items-center justify-between border-b border-white/10 px-6 py-4">
       <div className="flex items-center gap-4">
         <h1 className="text-xl font-bold tracking-tight text-white">Polymarket Edge</h1>
-        <span
-          className={`rounded px-2 py-0.5 text-xs font-semibold ${
-            isLive ? 'bg-red-500/20 text-red-400' : 'bg-emerald-500/20 text-emerald-400'
-          }`}
-        >
+        <span className={`rounded px-2 py-0.5 text-xs font-semibold ${modeBg}`}>
           {mode}
         </span>
       </div>

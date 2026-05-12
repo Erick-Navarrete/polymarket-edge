@@ -4,6 +4,7 @@ from decimal import Decimal
 import structlog
 
 from src.core.config import Settings
+from src.core.metrics import risk_violations
 from src.core.strategy_base import TradeSignal
 
 logger = structlog.get_logger()
@@ -52,6 +53,7 @@ class RiskManager:
     def approve(self, signal: TradeSignal, current_equity: Decimal) -> TradeSignal:
         """Validate a trade signal against all risk limits. Returns signal or raises."""
         if self._halted:
+            risk_violations.labels(violation_type="halted").inc()
             raise RiskViolation(f"System halted: {self._halt_reason}")
 
         self.set_equity(current_equity)
@@ -59,6 +61,7 @@ class RiskManager:
 
         # Position size limit
         if trade_value > self.settings.max_position_size_usd:
+            risk_violations.labels(violation_type="position_size").inc()
             raise RiskViolation(
                 f"Position size ${trade_value} exceeds max ${self.settings.max_position_size_usd}"
             )
@@ -66,6 +69,7 @@ class RiskManager:
         # Total exposure limit
         projected_exposure = self._total_exposure + trade_value
         if projected_exposure > self.settings.max_total_exposure_usd:
+            risk_violations.labels(violation_type="total_exposure").inc()
             raise RiskViolation(
                 f"Total exposure ${projected_exposure} would exceed max ${self.settings.max_total_exposure_usd}"
             )
@@ -76,6 +80,7 @@ class RiskManager:
         if current_equity > 0:
             daily_loss_pct = abs(min(daily_pnl, Decimal("0"))) / current_equity * 100
             if daily_loss_pct >= self.settings.max_daily_loss_pct:
+                risk_violations.labels(violation_type="daily_loss").inc()
                 raise RiskViolation(
                     f"Daily loss {daily_loss_pct:.1f}% exceeds max {self.settings.max_daily_loss_pct}%"
                 )
@@ -86,6 +91,7 @@ class RiskManager:
         if current_equity > 0:
             monthly_loss_pct = abs(min(monthly_pnl, Decimal("0"))) / current_equity * 100
             if monthly_loss_pct >= self.settings.max_monthly_loss_pct:
+                risk_violations.labels(violation_type="monthly_loss").inc()
                 raise RiskViolation(
                     f"Monthly loss {monthly_loss_pct:.1f}% exceeds max {self.settings.max_monthly_loss_pct}%"
                 )
@@ -94,6 +100,7 @@ class RiskManager:
         if self._peak_equity > 0:
             drawdown_pct = (self._peak_equity - self._current_equity) / self._peak_equity * 100
             if drawdown_pct >= self.settings.max_drawdown_pct:
+                risk_violations.labels(violation_type="drawdown").inc()
                 raise RiskViolation(
                     f"Drawdown {drawdown_pct:.1f}% exceeds max {self.settings.max_drawdown_pct}%"
                 )

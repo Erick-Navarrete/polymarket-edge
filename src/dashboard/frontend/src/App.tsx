@@ -53,8 +53,8 @@ function App() {
       </main>
 
       <footer className="border-t border-white/10 px-6 py-3 text-center text-xs text-white/30">
-        Polymarket Edge v{status?.version ?? '—'} &middot;{' '}
-        {status?.mode ?? '—'} mode
+        Polymarket Edge v{status?.version ?? '——'} &middot;{' '}
+        {status?.mode ?? '——'} mode
       </footer>
     </div>
   )

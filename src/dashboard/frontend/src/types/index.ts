@@ -1,7 +1,7 @@
 export interface SystemStatus {
   name: string
   version: string
-  mode: 'LIVE' | 'PAPER'
+  mode: 'LIVE' | 'SHADOW' | 'PAPER'
 }
 
 export interface StrategyInfo {
