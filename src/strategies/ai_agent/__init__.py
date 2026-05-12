@@ -4,6 +4,8 @@ import structlog
 from decimal import Decimal
 from typing import Any
 
+from tenacity import retry, stop_after_attempt, wait_exponential
+
 from src.core.config import Settings
 from src.core.strategy_base import MarketData, Strategy, TradeSignal
 
@@ -138,32 +140,9 @@ class AIAgentStrategy(Strategy):
     async def _estimate_probability(self, data: MarketData) -> ProbabilityEstimate | None:
         """Use LLM to estimate probability for a market question."""
         try:
-            from openai import AsyncOpenAI
-
-            client = AsyncOpenAI(api_key=self.settings.openai_api_key)
-            response = await client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a prediction market analyst. Estimate the probability "
-                            "that the following event will occur. Respond in JSON format: "
-                            '{"probability": <float 0-1>, "confidence": <float 0-1>, '
-                            '"reasoning": "<brief explanation>", "sources": ["<source1>"]}'
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Market question: {data.question}\nCurrent YES price: {data.yes_price}",
-                    },
-                ],
-                temperature=0.3,
-                max_tokens=300,
-            )
+            response = await self._call_llm(data)
 
             content = response.choices[0].message.content or ""
-            # Parse JSON response
             import json
 
             result = json.loads(content)
@@ -179,6 +158,33 @@ class AIAgentStrategy(Strategy):
         except Exception as e:
             logger.warning("ai_estimate_failed", condition_id=data.condition_id, error=str(e))
             return None
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
+    async def _call_llm(self, data: MarketData) -> Any:
+        """Call LLM API with retry for transient failures only."""
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(api_key=self.settings.openai_api_key, timeout=30)
+        return await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a prediction market analyst. Estimate the probability "
+                        "that the following event will occur. Respond in JSON format: "
+                        '{"probability": <float 0-1>, "confidence": <float 0-1>, '
+                        '"reasoning": "<brief explanation>", "sources": ["<source1>"]}'
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Market question: {data.question}\nCurrent YES price: {data.yes_price}",
+                },
+            ],
+            temperature=0.3,
+            max_tokens=300,
+        )
 
     async def on_fill(self, signal: TradeSignal, fill_price: Decimal, fill_size: Decimal) -> None:
         self._total_pnl += (signal.price - fill_price) * fill_size

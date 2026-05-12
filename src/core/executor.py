@@ -37,6 +37,7 @@ class Executor:
         self._clob_client = None
         self._paper_fills: list[dict] = []
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
     async def initialize(self) -> None:
         """Set up the CLOB client for live trading (skipped in paper mode)."""
         if self.settings.live_mode:
@@ -47,6 +48,7 @@ class Executor:
                     self.settings.clob_api_url,
                     key=self.settings.polymarket_api_key,
                     chain_id=137,  # Polygon mainnet
+                    timeout=self.settings.order_timeout_seconds,
                 )
                 logger.info("clob_client_initialized", mode="LIVE")
             except Exception as e:

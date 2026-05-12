@@ -1,3 +1,4 @@
+import asyncio
 import json
 from decimal import Decimal
 from typing import AsyncIterator
@@ -11,6 +12,8 @@ from src.core.config import Settings
 from src.core.strategy_base import MarketData
 
 logger = structlog.get_logger()
+
+WS_RECONNECT_DELAY = 3  # seconds between reconnect attempts
 
 
 class DataFeed:
@@ -61,7 +64,7 @@ class DataFeed:
         return Decimal(str(data.get("mid", "0")))
 
     async def stream_market(self, token_ids: list[str]) -> AsyncIterator[MarketData]:
-        """Stream real-time market data via WebSocket."""
+        """Stream real-time market data via WebSocket with auto-reconnect."""
         subscribe_msg = {
             "auth": {},
             "markets": [
@@ -70,16 +73,35 @@ class DataFeed:
             ],
         }
 
-        async with websockets.connect(self._ws_url) as ws:
-            await ws.send(json.dumps({"type": "subscribe", **subscribe_msg}))
-            logger.info("ws_subscribed", tokens=len(token_ids))
+        while True:
+            try:
+                async with websockets.connect(
+                self._ws_url,
+                ping_timeout=30,
+                close_timeout=10,
+            ) as ws:
+                    await ws.send(json.dumps({"type": "subscribe", **subscribe_msg}))
+                    logger.info("ws_subscribed", tokens=len(token_ids))
 
-            async for raw_msg in ws:
-                msg = json.loads(raw_msg)
-                if msg.get("type") == "price_change":
-                    data = self._parse_price_change(msg)
-                    if data:
-                        yield data
+                    async for raw_msg in ws:
+                        msg = json.loads(raw_msg)
+                        if msg.get("type") == "price_change":
+                            data = self._parse_price_change(msg)
+                            if data:
+                                yield data
+
+            except (
+                websockets.ConnectionClosed,
+                websockets.InvalidStatusCode,
+                OSError,
+            ) as e:
+                logger.warning(
+                    "ws_disconnected",
+                    error=str(e),
+                    reconnect_in=WS_RECONNECT_DELAY,
+                )
+                await asyncio.sleep(WS_RECONNECT_DELAY)
+                logger.info("ws_reconnecting")
 
     def _parse_price_change(self, msg: dict) -> MarketData | None:
         """Convert a WebSocket price_change message to MarketData."""
