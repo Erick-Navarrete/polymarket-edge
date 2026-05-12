@@ -1,0 +1,111 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Total Equity",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "targets": [{ "expr": "polymarket_equity_total", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "thresholds": {
+            "steps": [
+              { "value": null, "color": "green" },
+              { "value": -100, "color": "red" }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Daily PnL",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "targets": [{ "expr": "polymarket_daily_pnl", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "thresholds": {
+            "steps": [
+              { "value": null, "color": "green" },
+              { "value": 0, "color": "orange" },
+              { "value": -50, "color": "red" }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Drawdown %",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "targets": [{ "expr": "polymarket_drawdown_pct", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 40,
+          "thresholds": {
+            "steps": [
+              { "value": null, "color": "green" },
+              { "value": 15, "color": "orange" },
+              { "value": 25, "color": "red" }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "System Halted",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "targets": [{ "expr": "polymarket_halted", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "RUNNING", "color": "green" }, "1": { "text": "HALTED", "color": "red" } } }
+          ]
+        }
+      }
+    },
+    {
+      "title": "Strategy PnL",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [{ "expr": "polymarket_strategy_pnl", "legendFormat": "{{strategy}}", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" } }
+    },
+    {
+      "title": "Total Exposure",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [{ "expr": "polymarket_total_exposure", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" } }
+    },
+    {
+      "title": "Trades per Strategy",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [{ "expr": "increase(polymarket_trades_total[1h])", "legendFormat": "{{strategy}}", "refId": "A" }]
+    },
+    {
+      "title": "Risk Events",
+      "type": "logpanel",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [{ "expr": "{unit=\"risk\"}|=~\"violation|halt|circuit\"", "refId": "A" }]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["polymarket", "trading"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "Polymarket Edge - Trading Overview",
+  "uid": "polymarket-edge-trading",
+  "version": 1
+}

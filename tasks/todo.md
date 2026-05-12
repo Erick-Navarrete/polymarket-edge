@@ -36,7 +36,7 @@
 - [x] useWebSocket hook with auto-reconnect
 - [x] useApi hooks for REST endpoints + strategy toggle
 - [x] FastAPI serves React SPA in production (static files from frontend/dist/)
-- [ ] Grafana dashboards for system health, trade execution, risk metrics
+- [x] Grafana dashboards for system health, trade execution, risk metrics
 
 ## Phase 5: Hardening
 - [ ] Integration tests for each strategy in paper mode
@@ -47,4 +47,4 @@
 ## Review
 - Phase 1 complete. Phase 2 complete (6 strategies). Phase 3 core done (harness + data loader).
 - Dashboard backend complete. React frontend + Grafana dashboards remain.
-- Next: Grafana dashboards, backtest on real data, then hardening.
+- Next: backtest on real data, then hardening (integration tests, security audit).
