@@ -39,12 +39,13 @@
 - [x] Grafana dashboards for system health, trade execution, risk metrics
 
 ## Phase 5: Hardening
-- [ ] Integration tests for each strategy in paper mode
-- [ ] Security audit of dependency tree (check for typosquatted packages)
+- [x] Integration tests for each strategy in paper mode
+- [x] Security audit of dependency tree (check for typosquatted packages)
 - [ ] Rate limiting and retry logic on all external API calls
 - [ ] Key rotation documentation
+- [ ] Remove pmxt dependency (flagged in security audit — unofficial, sidecar security risk)
 
 ## Review
 - Phase 1 complete. Phase 2 complete (6 strategies). Phase 3 core done (harness + data loader).
 - Dashboard backend complete. React frontend + Grafana dashboards remain.
-- Next: backtest on real data, then hardening (integration tests, security audit).
+- Next: backtest on real data, remove pmxt, key rotation docs, rate limiting hardening.

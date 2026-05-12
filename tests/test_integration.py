@@ -9,7 +9,7 @@ from decimal import Decimal
 
 from src.core.config import Settings
 from src.core.engine import Engine
-from src.core.strategy_base import MarketData, Strategy, TradeSignal
+from src.core.strategy_base import MarketData
 
 
 # --- Helpers ---
