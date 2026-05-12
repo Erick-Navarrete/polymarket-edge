@@ -76,7 +76,7 @@ def test_daily_loss_circuit_breaker(risk_manager):
 
 
 def test_drawdown_halts_system(risk_manager):
-    """30% drawdown should halt the system."""
+    """25% drawdown should halt the system."""
     risk_manager.set_equity(Decimal("1000"))
     # Peak is now 1000
     risk_manager.set_equity(Decimal("750"))  # 25% drawdown -> should halt
@@ -94,12 +94,12 @@ def test_critical_halt_at_40_pct(risk_manager):
 def test_total_exposure_limit(risk_manager):
     """Trade that would exceed total exposure should be rejected."""
     risk_manager.set_equity(Decimal("10000"))
-    risk_manager.update_exposure(Decimal("4900"))
+    risk_manager.update_exposure(Decimal("4950"))
     signal = TradeSignal(
         condition_id="0xabc123",
         side="BUY_YES",
         price=Decimal("0.50"),
-        size=Decimal("200"),  # $100 trade would push to $5000+
+        size=Decimal("200"),  # $100 trade -> $5050 total > $5000 limit
         reason="test",
         strategy="test_strategy",
     )

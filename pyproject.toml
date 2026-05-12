@@ -51,3 +51,6 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]

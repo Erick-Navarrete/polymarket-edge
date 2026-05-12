@@ -32,6 +32,7 @@ class RiskManager:
         self._current_equity = equity
         if equity > self._peak_equity:
             self._peak_equity = equity
+        self._check_circuit_breakers()
 
     def record_pnl(self, pnl: Decimal) -> None:
         """Record realized PnL for daily/monthly tracking."""

@@ -2,6 +2,7 @@
 
 import asyncio
 import signal as sig
+import sys
 from decimal import Decimal
 
 import structlog
@@ -59,10 +60,11 @@ class Engine:
         for strategy in self._strategies.values():
             await strategy.start()
 
-        # Register signal handlers for graceful shutdown
-        loop = asyncio.get_event_loop()
-        for s in (sig.SIGTERM, sig.SIGINT):
-            loop.add_signal_handler(s, lambda: asyncio.create_task(self.stop()))
+        # Register signal handlers for graceful shutdown (Unix only)
+        if sys.platform != "win32":
+            loop = asyncio.get_event_loop()
+            for s in (sig.SIGTERM, sig.SIGINT):
+                loop.add_signal_handler(s, lambda: asyncio.create_task(self.stop()))
 
         logger.info("engine_started")
 
