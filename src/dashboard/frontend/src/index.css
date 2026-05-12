@@ -1,0 +1,11 @@
+@import "tailwindcss";
+
+body {
+  margin: 0;
+  background: #0f1117;
+  color: #e5e7eb;
+}
+
+#root {
+  min-height: 100vh;
+}
