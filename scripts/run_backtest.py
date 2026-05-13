@@ -17,6 +17,7 @@ import asyncio
 from decimal import Decimal
 
 from src.backtesting.harness import BacktestHarness
+from src.backtesting.walk_forward import WalkForwardValidator, Crypto15mWFValidator
 from src.core.config import Settings
 from src.core.data_feed import DataFeed
 from src.core.strategy_base import MarketData
@@ -172,10 +173,72 @@ async def run_backtest(strategy_name: str, settings: Settings) -> dict:
     return result.summary()
 
 
-async def main(strategy_filter: str | None = None) -> None:
+async def run_walk_forward(strategy_name: str, settings: Settings) -> dict:
+    """Run walk-forward validation for a strategy."""
+    desc, data_gen = STRATEGIES[strategy_name]
+    # Use more data for walk-forward (needs enough for train + test splits)
+    data = data_gen()
+
+    if strategy_name == "crypto_15m":
+        strategy = Crypto15mStrategy(settings)
+        validator = Crypto15mWFValidator(initial_equity=Decimal("1000"))
+    else:
+        if strategy_name == "arbitrage":
+            strategy = ArbitrageStrategy(settings, DataFeed(settings))
+        elif strategy_name == "market_making":
+            strategy = MarketMakingStrategy(settings)
+        elif strategy_name == "weather":
+            strategy = WeatherStrategy(settings)
+            for d in data[:50]:
+                strategy.update_forecast(d.condition_id, WeatherForecast(
+                    location="NYC", high_temp_f=Decimal("94"),
+                    precipitation_prob=Decimal("0.1"),
+                ))
+        elif strategy_name == "copy_trading":
+            strategy = CopyTradingStrategy(settings)
+        else:
+            raise ValueError(f"Unknown strategy: {strategy_name}")
+        validator = WalkForwardValidator(initial_equity=Decimal("1000"))
+
+    await strategy.start()
+    result = await validator.validate(strategy, data)
+    await strategy.stop()
+    return result.summary()
+
+
+async def main(strategy_filter: str | None = None, walk_forward: bool = False) -> None:
     settings = Settings(live_mode=False)
 
     targets = {strategy_filter} if strategy_filter else set(STRATEGIES.keys())
+
+    if walk_forward:
+        print("\n" + "=" * 80)
+        print("Polymarket Edge — Walk-Forward Validation")
+        print("=" * 80)
+        print(f"{'Strategy':<20} {'Windows':>8} {'Trades':>7} {'OOS Sharpe':>10} {'OOS Win%':>9} {'Sharpe Degr':>11} {'OOS PnL':>10} {'Risk':>8}")
+        print("-" * 80)
+
+        for name in sorted(targets):
+            if name not in STRATEGIES:
+                print(f"Unknown strategy: {name}")
+                continue
+            try:
+                result = await run_walk_forward(name, settings)
+                print(
+                    f"{result['strategy']:<20} "
+                    f"{result['num_windows']:>8} "
+                    f"{result['total_test_trades']:>7} "
+                    f"{result['avg_test_sharpe']:>10} "
+                    f"{result['avg_test_win_rate']:>9} "
+                    f"{result['avg_sharpe_degradation']:>11} "
+                    f"${result['total_test_pnl']:>9} "
+                    f"{result['overfitting_risk']:>8}"
+                )
+            except Exception as e:
+                print(f"{name:<20} ERROR: {e}")
+
+        print("=" * 80 + "\n")
+        return
 
     print("\n" + "=" * 80)
     print("Polymarket Edge — Backtest Results")
@@ -214,5 +277,10 @@ if __name__ == "__main__":
         choices=list(STRATEGIES.keys()),
         help="Run a specific strategy (default: all)",
     )
+    parser.add_argument(
+        "--walk-forward",
+        action="store_true",
+        help="Run walk-forward validation instead of simple backtest",
+    )
     args = parser.parse_args()
-    asyncio.run(main(args.strategy))
+    asyncio.run(main(args.strategy, walk_forward=args.walk_forward))
