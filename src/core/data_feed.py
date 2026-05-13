@@ -69,6 +69,10 @@ class DataFeed:
         Uses the Polymarket CLOB Market Channel WebSocket:
         wss://ws-subscriptions-clob.polymarket.com/ws/market
         Subscribe with assets_ids (token IDs) per the CLOB API spec.
+
+        Server sends two message types:
+        1. Initial snapshot: JSON list of orderbook dicts (asset_id, bids, asks)
+        2. Incremental updates: dict with market + price_changes array
         """
         subscribe_msg = {
             "assets_ids": token_ids,
@@ -88,11 +92,7 @@ class DataFeed:
                     async for raw_msg in ws:
                         try:
                             msg = json.loads(raw_msg)
-                            # Server may send initial dump as a list; skip non-dict messages
-                            if not isinstance(msg, dict):
-                                continue
-                            data = self._parse_ws_message(msg)
-                            if data:
+                            async for data in self._parse_ws_message(msg):
                                 yield data
                         except Exception as e:
                             logger.warning("ws_msg_parse_error", error=str(e))
@@ -110,52 +110,49 @@ class DataFeed:
                 await asyncio.sleep(WS_RECONNECT_DELAY)
                 logger.info("ws_reconnecting")
 
-    def _parse_ws_message(self, msg: dict) -> MarketData | None:
-        """Parse a WebSocket message into MarketData.
+    async def _parse_ws_message(self, msg) -> AsyncIterator[MarketData]:
+        """Parse a WebSocket message into one or more MarketData objects.
 
-        Handles multiple event types from the CLOB Market Channel:
-        - price_change: mid-price updates
-        - best_bid_ask: best bid/ask updates (level 2+)
+        Handles the actual CLOB Market Channel wire format:
+        - Initial snapshot: JSON list of orderbook dicts
+        - Incremental: dict with `market` + `price_changes` array
         """
-        msg_type = msg.get("type", "")
+        if isinstance(msg, list):
+            # Initial orderbook snapshot — one entry per asset
+            for entry in msg:
+                if isinstance(entry, dict):
+                    data = self._parse_orderbook_snapshot(entry)
+                    if data:
+                        yield data
+            return
 
-        if msg_type == "price_change":
-            return self._parse_price_change(msg)
-        elif msg_type == "best_bid_ask":
-            return self._parse_best_bid_ask(msg)
+        if not isinstance(msg, dict):
+            return
 
-        return None
+        # Incremental price change update
+        price_changes = msg.get("price_changes", [])
+        if price_changes:
+            for change in price_changes:
+                data = self._parse_price_change(change, msg.get("market", ""))
+                if data:
+                    yield data
+            return
 
-    def _parse_price_change(self, msg: dict) -> MarketData | None:
-        """Convert a WebSocket price_change message to MarketData."""
+    def _parse_orderbook_snapshot(self, entry: dict) -> MarketData | None:
+        """Parse an initial orderbook snapshot entry into MarketData."""
         try:
-            market_data = msg.get("market_data", {})
-            return MarketData(
-                condition_id=market_data.get("condition_id", ""),
-                question=market_data.get("question", ""),
-                yes_price=Decimal(str(market_data.get("yes_price", "0"))),
-                no_price=Decimal(str(market_data.get("no_price", "0"))),
-                spread=Decimal(str(market_data.get("spread", "0"))),
-                volume_24h=Decimal(str(market_data.get("volume_24h", "0"))),
-                timestamp=market_data.get("timestamp", 0),
-                raw=msg,
-            )
-        except Exception:
-            logger.warning("ws_parse_error", raw=msg)
-            return None
+            asset_id = entry.get("asset_id", "")
+            bids = entry.get("bids", [])
+            asks = entry.get("asks", [])
 
-    def _parse_best_bid_ask(self, msg: dict) -> MarketData | None:
-        """Convert a WebSocket best_bid_ask message to MarketData."""
-        try:
-            asset_id = msg.get("asset_id", "")
-            best_bid = Decimal(str(msg.get("best_bid", "0")))
-            best_ask = Decimal(str(msg.get("best_ask", "0")))
+            best_bid = Decimal(str(bids[0]["price"])) if bids else Decimal("0")
+            best_ask = Decimal(str(asks[0]["price"])) if asks else Decimal("0")
 
-            if best_bid <= 0 or best_ask <= 0:
+            if best_bid <= 0 and best_ask <= 0:
                 return None
 
-            mid = (best_bid + best_ask) / Decimal("2")
-            spread = best_ask - best_bid
+            mid = (best_bid + best_ask) / Decimal("2") if (best_bid > 0 and best_ask > 0) else (best_bid or best_ask)
+            spread = (best_ask - best_bid) if (best_bid > 0 and best_ask > 0) else Decimal("0")
 
             return MarketData(
                 condition_id=asset_id,
@@ -164,11 +161,48 @@ class DataFeed:
                 no_price=Decimal("1") - mid,
                 spread=spread,
                 volume_24h=Decimal("0"),
-                timestamp=msg.get("timestamp", 0),
-                raw=msg,
+                timestamp=int(entry.get("timestamp", 0)),
+                raw=entry,
             )
         except Exception:
-            logger.warning("ws_parse_error", raw=msg)
+            logger.warning("ws_parse_error", raw=entry)
+            return None
+
+    def _parse_price_change(self, change: dict, market: str) -> MarketData | None:
+        """Parse a single price_change entry from a price_changes array.
+
+        Each entry has: asset_id, price, size, side, best_bid, best_ask, hash.
+        """
+        try:
+            asset_id = change.get("asset_id", "")
+            best_bid = Decimal(str(change.get("best_bid", "0")))
+            best_ask = Decimal(str(change.get("best_ask", "0")))
+            trade_price = Decimal(str(change.get("price", "0")))
+
+            if best_bid > 0 and best_ask > 0:
+                mid = (best_bid + best_ask) / Decimal("2")
+                spread = best_ask - best_bid
+            elif trade_price > 0:
+                mid = trade_price
+                spread = Decimal("0")
+            else:
+                return None
+
+            if mid <= 0 or mid > Decimal("1"):
+                return None
+
+            return MarketData(
+                condition_id=asset_id,
+                question="",
+                yes_price=mid,
+                no_price=Decimal("1") - mid,
+                spread=spread,
+                volume_24h=Decimal(str(change.get("size", "0"))),
+                timestamp=0,
+                raw=change,
+            )
+        except Exception:
+            logger.warning("ws_parse_error", raw=change)
             return None
 
     async def close(self) -> None:
