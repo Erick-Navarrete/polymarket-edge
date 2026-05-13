@@ -64,31 +64,38 @@ class DataFeed:
         return Decimal(str(data.get("mid", "0")))
 
     async def stream_market(self, token_ids: list[str]) -> AsyncIterator[MarketData]:
-        """Stream real-time market data via WebSocket with auto-reconnect."""
+        """Stream real-time market data via WebSocket with auto-reconnect.
+
+        Uses the Polymarket CLOB Market Channel WebSocket:
+        wss://ws-subscriptions-clob.polymarket.com/ws/market
+        Subscribe with assets_ids (token IDs) per the CLOB API spec.
+        """
         subscribe_msg = {
-            "auth": {},
-            "markets": [
-                {"market": {"condition_id": tid}, "side": "all"}
-                for tid in token_ids
-            ],
+            "assets_ids": token_ids,
+            "type": "market",
         }
 
         while True:
             try:
                 async with websockets.connect(
-                self._ws_url,
-                ping_timeout=30,
-                close_timeout=10,
-            ) as ws:
-                    await ws.send(json.dumps({"type": "subscribe", **subscribe_msg}))
+                    self._ws_url,
+                    ping_timeout=30,
+                    close_timeout=10,
+                ) as ws:
+                    await ws.send(json.dumps(subscribe_msg))
                     logger.info("ws_subscribed", tokens=len(token_ids))
 
                     async for raw_msg in ws:
-                        msg = json.loads(raw_msg)
-                        if msg.get("type") == "price_change":
-                            data = self._parse_price_change(msg)
+                        try:
+                            msg = json.loads(raw_msg)
+                            # Server may send initial dump as a list; skip non-dict messages
+                            if not isinstance(msg, dict):
+                                continue
+                            data = self._parse_ws_message(msg)
                             if data:
                                 yield data
+                        except Exception as e:
+                            logger.warning("ws_msg_parse_error", error=str(e))
 
             except (
                 websockets.ConnectionClosed,
@@ -103,6 +110,22 @@ class DataFeed:
                 await asyncio.sleep(WS_RECONNECT_DELAY)
                 logger.info("ws_reconnecting")
 
+    def _parse_ws_message(self, msg: dict) -> MarketData | None:
+        """Parse a WebSocket message into MarketData.
+
+        Handles multiple event types from the CLOB Market Channel:
+        - price_change: mid-price updates
+        - best_bid_ask: best bid/ask updates (level 2+)
+        """
+        msg_type = msg.get("type", "")
+
+        if msg_type == "price_change":
+            return self._parse_price_change(msg)
+        elif msg_type == "best_bid_ask":
+            return self._parse_best_bid_ask(msg)
+
+        return None
+
     def _parse_price_change(self, msg: dict) -> MarketData | None:
         """Convert a WebSocket price_change message to MarketData."""
         try:
@@ -115,6 +138,33 @@ class DataFeed:
                 spread=Decimal(str(market_data.get("spread", "0"))),
                 volume_24h=Decimal(str(market_data.get("volume_24h", "0"))),
                 timestamp=market_data.get("timestamp", 0),
+                raw=msg,
+            )
+        except Exception:
+            logger.warning("ws_parse_error", raw=msg)
+            return None
+
+    def _parse_best_bid_ask(self, msg: dict) -> MarketData | None:
+        """Convert a WebSocket best_bid_ask message to MarketData."""
+        try:
+            asset_id = msg.get("asset_id", "")
+            best_bid = Decimal(str(msg.get("best_bid", "0")))
+            best_ask = Decimal(str(msg.get("best_ask", "0")))
+
+            if best_bid <= 0 or best_ask <= 0:
+                return None
+
+            mid = (best_bid + best_ask) / Decimal("2")
+            spread = best_ask - best_bid
+
+            return MarketData(
+                condition_id=asset_id,
+                question="",
+                yes_price=mid,
+                no_price=Decimal("1") - mid,
+                spread=spread,
+                volume_24h=Decimal("0"),
+                timestamp=msg.get("timestamp", 0),
                 raw=msg,
             )
         except Exception:

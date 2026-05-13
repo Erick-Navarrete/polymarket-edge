@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     slack_webhook_url: str = ""
 
     # === Data Feed ===
-    clob_ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws"
+    clob_ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     clob_api_url: str = "https://clob.polymarket.com"
     gamma_api_url: str = "https://gamma-api.polymarket.com"
 
