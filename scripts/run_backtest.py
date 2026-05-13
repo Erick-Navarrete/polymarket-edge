@@ -1,19 +1,21 @@
 """Run backtests for all strategies using synthetic historical data.
 
 Usage:
-    python scripts/run_backtest.py                   # Run all strategies
-    python scripts/run_backtest.py --strategy arbitrage  # Run one strategy
+    python scripts/run_backtest.py                     # Run all strategies
+    python scripts/run_backtest.py --strategy arbitrage # Run one strategy
+    python scripts/run_backtest.py --walk-forward       # Walk-forward mode
 
 This script generates representative synthetic market data that exercises
 each strategy's logic, then runs them through the backtest harness and
 prints a performance summary table.
 
-For real historical data, set POLYMARKET_API_KEY in .env and use
---live-data flag (requires API access).
+For real historical data, use run_live_backtest.py (no API key needed
+for the public Gamma API).
 """
 
 import argparse
 import asyncio
+import random
 from decimal import Decimal
 
 from src.backtesting.harness import BacktestHarness
@@ -23,7 +25,7 @@ from src.core.data_feed import DataFeed
 from src.core.strategy_base import MarketData
 from src.strategies.arbitrage import ArbitrageStrategy
 from src.strategies.market_making import MarketMakingStrategy
-from src.strategies.copy_trading import CopyTradingStrategy
+from src.strategies.copy_trading import CopyTradingStrategy, CopyTarget
 from src.strategies.crypto_15m import Crypto15mStrategy
 from src.strategies.weather import WeatherStrategy, WeatherForecast
 
@@ -32,7 +34,6 @@ def generate_arb_data(n: int = 200) -> list[MarketData]:
     """Generate market data with periodic internal arb opportunities."""
     data = []
     for i in range(n):
-        # ~20% of the time, YES+NO < $1 (arb opportunity)
         if i % 5 == 0:
             yes = Decimal("0.42") + Decimal(str(i % 7)) * Decimal("0.01")
             no = Decimal("0.48") + Decimal(str(i % 5)) * Decimal("0.01")
@@ -56,7 +57,6 @@ def generate_mm_data(n: int = 200) -> list[MarketData]:
     data = []
     mid = Decimal("0.50")
     for i in range(n):
-        # Random walk around 0.50
         step = Decimal(str(((i * 7 + 3) % 5 - 2))) * Decimal("0.005")
         mid = max(Decimal("0.30"), min(Decimal("0.70"), mid + step))
         spread = Decimal("0.02") + Decimal(str(i % 3)) * Decimal("0.01")
@@ -73,16 +73,38 @@ def generate_mm_data(n: int = 200) -> list[MarketData]:
 
 
 def generate_crypto_data(n: int = 200) -> list[MarketData]:
-    """Generate volatile price data simulating 15-min BTC markets."""
+    """Generate volatile price data simulating 15-min BTC markets.
+
+    Includes: steady trends (momentum), sudden spikes (>5% from mean),
+    extreme prices (mean reversion at <0.1 or >0.9), and divergence
+    from a simulated futures reference price.
+    Returns (data, futures_prices) where futures_prices maps
+    condition_id -> list of futures prices per bar.
+    """
+    rng = random.Random(42)
     data = []
     price = Decimal("0.50")
+    futures_prices: list[Decimal] = []
+
     for i in range(n):
-        # More volatile moves
-        step = Decimal(str(((i * 13 + 7) % 9 - 4))) * Decimal("0.02")
-        price = max(Decimal("0.05"), min(Decimal("0.95"), price + step))
-        # Occasional spikes
-        if i % 15 == 0:
-            price = max(Decimal("0.05"), min(Decimal("0.95"), price + Decimal("0.10")))
+        regime = i % 50
+        if regime < 15:
+            step = Decimal(str(rng.uniform(0.005, 0.02)))
+        elif regime < 30:
+            step = Decimal(str(rng.uniform(-0.02, -0.005)))
+        elif regime < 40:
+            step = Decimal(str(rng.uniform(-0.005, 0.005)))
+        elif regime < 47:
+            step = Decimal(str(rng.choice([-0.08, -0.06, 0.06, 0.08])))
+        else:
+            direction = 1 if rng.random() > 0.5 else -1
+            step = Decimal(str(direction * rng.uniform(0.02, 0.05)))
+
+        price = max(Decimal("0.03"), min(Decimal("0.97"), price + step))
+        futures = max(Decimal("0.01"), min(Decimal("0.99"),
+                     price + Decimal(str(rng.uniform(-0.03, 0.03)))))
+        futures_prices.append(futures)
+
         data.append(MarketData(
             condition_id="0xbtc_15m",
             question="Will BTC be above $70k at 3pm?",
@@ -90,9 +112,10 @@ def generate_crypto_data(n: int = 200) -> list[MarketData]:
             no_price=Decimal("1") - price,
             spread=Decimal("0.01"),
             volume_24h=Decimal("50000"),
-            timestamp=1000.0 + i * 900,  # 15-min intervals
+            timestamp=1000.0 + i * 900,
         ))
-    return data
+
+    return data, futures_prices
 
 
 def generate_weather_data(n: int = 100) -> list[MarketData]:
@@ -114,15 +137,22 @@ def generate_weather_data(n: int = 100) -> list[MarketData]:
 
 
 def generate_copy_data(n: int = 100) -> list[MarketData]:
-    """Generate generic market data for copy trading (signals driven by wallet activity, not price)."""
+    """Generate market data for copy trading backtest.
+
+    Copy trading signals are driven by wallet activity, not price.
+    We generate price data and also return wallet events to inject
+    during the backtest.
+    """
+    rng = random.Random(42)
     data = []
     for i in range(n):
-        yes = Decimal("0.50") + Decimal(str(i % 9 - 4)) * Decimal("0.02")
+        yes = Decimal("0.50") + Decimal(str(rng.uniform(-0.15, 0.15)))
+        yes = max(Decimal("0.10"), min(Decimal("0.90"), yes))
         data.append(MarketData(
             condition_id="0xcopy_market",
             question="Will Z happen by end of month?",
-            yes_price=max(Decimal("0.10"), min(Decimal("0.90"), yes)),
-            no_price=max(Decimal("0.10"), min(Decimal("0.90"), Decimal("1") - yes)),
+            yes_price=yes,
+            no_price=Decimal("1") - yes,
             spread=Decimal("0.02"),
             volume_24h=Decimal("3000"),
             timestamp=1000.0 + i * 300,
@@ -133,14 +163,114 @@ def generate_copy_data(n: int = 100) -> list[MarketData]:
 STRATEGIES = {
     "arbitrage": ("Internal + cross-platform arb", generate_arb_data),
     "market_making": ("Bands strategy on CLOB", generate_mm_data),
-    "crypto_15m": ("BTC/ETH 15-min multi-signal fusion", generate_crypto_data),
-    "copy_trading": ("On-chain wallet follower", generate_copy_data),
+    "crypto_15m": ("BTC/ETH 15-min multi-signal fusion", None),  # special handling
+    "copy_trading": ("On-chain wallet follower", None),           # special handling
     "weather": ("NOAA forecast vs PM prices", generate_weather_data),
 }
 
 
+async def _run_crypto_backtest(settings: Settings, walk_forward: bool = False) -> dict:
+    """Run crypto_15m backtest with futures price injection."""
+    data, futures = generate_crypto_data(200)
+
+    if walk_forward:
+        strategy = Crypto15mStrategy(settings)
+        validator = Crypto15mWFValidator(initial_equity=Decimal("1000"))
+        # Set futures prices before validation
+        for i, (d, f) in enumerate(zip(data, futures)):
+            strategy.update_futures_price(d.condition_id, f)
+        await strategy.start()
+        result = await validator.validate(strategy, data)
+        await strategy.stop()
+        return result.summary()
+
+    strategy = Crypto15mStrategy(settings)
+    # Set futures prices so divergence detection fires
+    for d, f in zip(data, futures):
+        strategy.update_futures_price(d.condition_id, f)
+
+    harness = BacktestHarness(initial_equity=Decimal("1000"))
+    result = await harness.run(strategy, data, fill_model="midpoint")
+    await strategy.stop()
+    return result.summary()
+
+
+async def _run_copy_backtest(settings: Settings, walk_forward: bool = False) -> dict:
+    """Run copy_trading backtest with simulated wallet activity.
+
+    Since copy_trading signals come from wallet events (not on_data),
+    we simulate a profitable target wallet that trades periodically.
+    """
+    data = generate_copy_data(100)
+
+    strategy = CopyTradingStrategy(settings)
+    target = CopyTarget(
+        address="0xdeadbeef",
+        label="whale_1",
+        copy_ratio=Decimal("0.1"),
+        max_copy_size=Decimal("50"),
+    )
+    # Simulate target's track record (make it qualified)
+    target.trades_tracked = 20
+    target.wins = 14  # 70% win rate
+    target.realized_pnl = Decimal("500")
+    target.current_positions["0xcopy_market"] = {"pnl": Decimal("100")}
+    strategy.add_target(target)
+
+    # Generate copy signals by simulating wallet activity alongside market data
+    # We inject signals through generate_copy_signal for every 5th data point
+    copy_signals = []
+    for i, d in enumerate(data):
+        if i % 5 == 0:
+            side = "BUY_YES" if d.yes_price < Decimal("0.50") else "BUY_NO"
+            sig = strategy.generate_copy_signal(
+                target_address="0xdeadbeef",
+                condition_id=d.condition_id,
+                side=side,
+                target_size=Decimal("100"),
+                price=d.yes_price if side == "BUY_YES" else d.no_price,
+            )
+            if sig:
+                copy_signals.append((d, sig))
+
+    # Run the base backtest first
+    harness = BacktestHarness(initial_equity=Decimal("1000"))
+    result = await harness.run(strategy, data, fill_model="midpoint")
+
+    # Now also process the copy signals through the harness manually
+    for d, sig in copy_signals:
+        fill_price = (d.yes_price + d.no_price) / Decimal("2")
+        pnl = (sig.price - fill_price) * sig.size
+        result.add_trade({
+            "timestamp": d.timestamp,
+            "condition_id": sig.condition_id,
+            "side": sig.side,
+            "signal_price": str(sig.price),
+            "fill_price": str(fill_price),
+            "size": str(sig.size),
+            "pnl": str(pnl),
+        })
+        await strategy.on_fill(sig, fill_price, sig.size)
+
+    result.final_equity = Decimal(str(result.final_equity)) if result.final_equity else Decimal("1000")
+    # Recalculate final equity from trades
+    equity = Decimal("1000")
+    for t in result.trades:
+        equity += Decimal(str(t.get("pnl", "0")))
+    result.final_equity = equity
+    result.calculate_sharpe()
+
+    await strategy.stop()
+    return result.summary()
+
+
 async def run_backtest(strategy_name: str, settings: Settings) -> dict:
     """Run a single strategy backtest and return summary."""
+    if strategy_name == "crypto_15m":
+        return await _run_crypto_backtest(settings)
+    elif strategy_name == "copy_trading":
+        return await _run_copy_backtest(settings)
+
     harness = BacktestHarness(initial_equity=Decimal("1000"))
     desc, data_gen = STRATEGIES[strategy_name]
     data = data_gen()
@@ -149,13 +279,8 @@ async def run_backtest(strategy_name: str, settings: Settings) -> dict:
         strategy = ArbitrageStrategy(settings, DataFeed(settings))
     elif strategy_name == "market_making":
         strategy = MarketMakingStrategy(settings)
-    elif strategy_name == "crypto_15m":
-        strategy = Crypto15mStrategy(settings)
-    elif strategy_name == "copy_trading":
-        strategy = CopyTradingStrategy(settings)
     elif strategy_name == "weather":
         strategy = WeatherStrategy(settings)
-        # Update forecasts for some data points to trigger signals
         for d in data[:50]:
             strategy.update_forecast(d.condition_id, WeatherForecast(
                 location="NYC",
@@ -166,39 +291,39 @@ async def run_backtest(strategy_name: str, settings: Settings) -> dict:
         raise ValueError(f"Unknown strategy: {strategy_name}")
 
     result = await harness.run(strategy, data, fill_model="midpoint")
-
-    # Reset strategy state for clean output
     await strategy.stop()
-
     return result.summary()
 
 
 async def run_walk_forward(strategy_name: str, settings: Settings) -> dict:
     """Run walk-forward validation for a strategy."""
+    if strategy_name == "crypto_15m":
+        return await _run_crypto_backtest(settings, walk_forward=True)
+    elif strategy_name == "copy_trading":
+        # Copy trading WF doesn't make sense with wallet-injected signals
+        return {"strategy": "copy_trading", "num_windows": 0, "total_test_trades": 0,
+                "avg_test_sharpe": "0.00", "avg_test_win_rate": "0.00%",
+                "avg_sharpe_degradation": "0.0%", "total_test_pnl": "0", "overfitting_risk": "N/A"}
+
     desc, data_gen = STRATEGIES[strategy_name]
-    # Use more data for walk-forward (needs enough for train + test splits)
     data = data_gen()
 
-    if strategy_name == "crypto_15m":
-        strategy = Crypto15mStrategy(settings)
-        validator = Crypto15mWFValidator(initial_equity=Decimal("1000"))
-    else:
-        if strategy_name == "arbitrage":
-            strategy = ArbitrageStrategy(settings, DataFeed(settings))
-        elif strategy_name == "market_making":
-            strategy = MarketMakingStrategy(settings)
-        elif strategy_name == "weather":
-            strategy = WeatherStrategy(settings)
-            for d in data[:50]:
-                strategy.update_forecast(d.condition_id, WeatherForecast(
-                    location="NYC", high_temp_f=Decimal("94"),
-                    precipitation_prob=Decimal("0.1"),
-                ))
-        elif strategy_name == "copy_trading":
-            strategy = CopyTradingStrategy(settings)
-        else:
-            raise ValueError(f"Unknown strategy: {strategy_name}")
+    if strategy_name == "weather":
+        strategy = WeatherStrategy(settings)
+        for d in data[:50]:
+            strategy.update_forecast(d.condition_id, WeatherForecast(
+                location="NYC", high_temp_f=Decimal("94"),
+                precipitation_prob=Decimal("0.1"),
+            ))
         validator = WalkForwardValidator(initial_equity=Decimal("1000"))
+    elif strategy_name == "arbitrage":
+        strategy = ArbitrageStrategy(settings, DataFeed(settings))
+        validator = WalkForwardValidator(initial_equity=Decimal("1000"))
+    elif strategy_name == "market_making":
+        strategy = MarketMakingStrategy(settings)
+        validator = WalkForwardValidator(initial_equity=Decimal("1000"))
+    else:
+        raise ValueError(f"Unknown strategy: {strategy_name}")
 
     await strategy.start()
     result = await validator.validate(strategy, data)
@@ -213,7 +338,7 @@ async def main(strategy_filter: str | None = None, walk_forward: bool = False) -
 
     if walk_forward:
         print("\n" + "=" * 80)
-        print("Polymarket Edge — Walk-Forward Validation")
+        print("Polymarket Edge - Walk-Forward Validation")
         print("=" * 80)
         print(f"{'Strategy':<20} {'Windows':>8} {'Trades':>7} {'OOS Sharpe':>10} {'OOS Win%':>9} {'Sharpe Degr':>11} {'OOS PnL':>10} {'Risk':>8}")
         print("-" * 80)
@@ -241,7 +366,7 @@ async def main(strategy_filter: str | None = None, walk_forward: bool = False) -
         return
 
     print("\n" + "=" * 80)
-    print("Polymarket Edge — Backtest Results")
+    print("Polymarket Edge - Backtest Results")
     print("=" * 80)
     print(f"{'Strategy':<20} {'Trades':>7} {'Win Rate':>10} {'PnL':>10} {'Sharpe':>8} {'Drawdown':>10} {'Equity':>10}")
     print("-" * 80)
@@ -271,15 +396,12 @@ async def main(strategy_filter: str | None = None, walk_forward: bool = False) -
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Polymarket Edge backtests")
     parser.add_argument(
-        "--strategy",
-        type=str,
-        default=None,
+        "--strategy", type=str, default=None,
         choices=list(STRATEGIES.keys()),
         help="Run a specific strategy (default: all)",
     )
     parser.add_argument(
-        "--walk-forward",
-        action="store_true",
+        "--walk-forward", action="store_true",
         help="Run walk-forward validation instead of simple backtest",
     )
     args = parser.parse_args()
