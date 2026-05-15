@@ -57,7 +57,7 @@ These are vetted open-source repos that inform our architecture:
 
 ## Project Status (Updated 2026-05-15)
 
-**All 5 phases complete.** 44 tests passing. Shadow mode verified (4/6 strategies firing).
+**All 5 phases complete.** 53 tests passing. Shadow mode verified (4/6 strategies firing).
 
 ### Completed (Session 1 -- 2026-05-14)
 - Market making signal cooldown (15s per market, configurable)
@@ -75,10 +75,19 @@ These are vetted open-source repos that inform our architecture:
 - **Shadow mode**: 4/6 strategies now fire live (arb: 59, copy: 38, mm: 576, crypto: 104)
 - **Pushed to GitHub**: 2 commits pushed to origin/main
 
+### Completed (Session 3 -- 2026-05-15)
+- **CLOB API auth in data_loader**: Authenticated OHLCV via py-clob-client when API key available; pseudo-timeseries fallback from Gamma trades
+- **DataFeed metadata enrichment**: `prefetch_metadata()` queries Gamma API for question/condition_id; WS-parsed MarketData now includes question text
+- **Weather strategy fixes**: Auto-detect rain markets (not just temperature), forecast key migration from asset_id to condition_id, dual-key forecasts in shadow_run
+- **Shadow run improvements**: `--include-weather` now caches market metadata; weather forecasts keyed by both condition_id and token_id
+- **AI agent improvements**: LLM estimate TTL (30min expiry + re-evaluation), reusable OpenAI client (no per-call instantiation), structured heuristic logging
+- **Deployment hardening**: Multi-stage Docker build (no Node.js in runtime image), HEALTHCHECK in Dockerfile, Prometheus volume persistence, expanded .dockerignore, render.yaml with all secrets + risk limits
+- **9 new tests**: weather auto-detect (temp/rain/non-weather), forecast key migration, data_feed metadata enrichment (snapshot/price-change/fallback), AI estimate staleness, AI heuristic logging
+
 ### Quick Commands
 ```bash
 cd C:\Users\Navar\Projects\polymarket-edge
-python -m pytest tests/ -v                    # Run 44 tests
+python -m pytest tests/ -v                    # Run 53 tests
 python scripts/run_backtest.py                # Synthetic backtest
 python scripts/run_live_backtest.py            # Live data backtest (Gamma API)
 python scripts/run_backtest.py --walk-forward  # Walk-forward validation
@@ -89,14 +98,15 @@ docker-compose up --build                     # Full stack (needs Docker)
 ```
 
 ### Remaining Work (Prioritized)
-1. **CLOB API auth for real OHLCV** -- need `POLYMARKET_API_KEY` in `.env`; enables true timeseries backtesting
-2. **Weather strategy in shadow mode** -- currently 0 signals; needs weather-type markets or broader selection
-3. **AI agent** -- needs `OPENAI_API_KEY` to fire; currently warns and skips
-4. **Docker deployment test** -- build and run on a Docker-enabled host
-5. **Render deploy** -- connect GitHub repo to Render, set secret env vars in dashboard
+1. **CLOB API key setup** -- code ready for authenticated OHLCV (via py-clob-client); just need `POLYMARKET_API_KEY` in `.env` to enable
+2. **Weather strategy verification** -- code fixes in place (metadata enrichment + auto-detect rain); verify with `--include-weather` flag on next shadow run
+3. **AI agent LLM mode** -- heuristic works well; needs `OPENAI_API_KEY` for LLM-based estimation (estimate TTL + client reuse in place)
+4. **Docker deploy test** -- multi-stage build ready; test on Docker-enabled host
+5. **Render deploy** -- render.yaml now has complete env vars; connect GitHub repo + set secrets in Render dashboard
 6. **Strategy tuning with real data:**
    - copy_trading momentum: verify on real trending markets (crypto events)
    - arbitrage mean-reversion: check if PM extreme prices actually revert
+   - weather: validate with `--include-weather` after metadata enrichment fix
 
 ### Deployment Notes
 - **Docker**: `docker-compose up --build` starts app (:8000) + Postgres + Redis + Grafana (:3001) + Prometheus (:9090)

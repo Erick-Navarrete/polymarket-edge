@@ -13,3 +13,7 @@ data/
 *.csv
 *.key
 *.pem
+tests/
+docs/
+*.md
+scripts/grafana/

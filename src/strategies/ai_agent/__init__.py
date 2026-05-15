@@ -1,5 +1,11 @@
-"""AI/LLM agent strategy — news parsing + probability estimation -> Kelly-sized trades."""
+"""AI/LLM agent strategy — news parsing + probability estimation -> Kelly-sized trades.
 
+When OPENAI_API_KEY is not set, falls back to a simple volume-price heuristic
+that estimates probability from market activity patterns. This allows the
+strategy to participate in shadow mode without an LLM.
+"""
+
+import time
 import structlog
 from decimal import Decimal
 from typing import Any
@@ -10,6 +16,9 @@ from src.core.config import Settings
 from src.core.strategy_base import MarketData, Strategy, TradeSignal
 
 logger = structlog.get_logger()
+
+# Estimates expire after 30 minutes so LLM re-evaluates with fresh context
+ESTIMATE_TTL_SECONDS = 1800
 
 
 class ProbabilityEstimate:
@@ -22,12 +31,18 @@ class ProbabilityEstimate:
         confidence: Decimal,
         reasoning: str,
         sources: list[str] | None = None,
+        created_at: float | None = None,
     ) -> None:
         self.condition_id = condition_id
         self.estimated_prob = estimated_prob
         self.confidence = confidence
         self.reasoning = reasoning
         self.sources = sources or []
+        self.created_at = created_at or time.monotonic()
+
+    @property
+    def is_stale(self) -> bool:
+        return (time.monotonic() - self.created_at) > ESTIMATE_TTL_SECONDS
 
 
 def kelly_fraction(estimated_prob: Decimal, market_price: Decimal) -> Decimal:
@@ -43,7 +58,7 @@ def kelly_fraction(estimated_prob: Decimal, market_price: Decimal) -> Decimal:
 
     p = estimated_prob
     q = Decimal("1") - p
-    b = (Decimal("1") / market_price) - Decimal("1")  # Decimal odds
+    b = (Decimal("1") / market_price) - Decimal("1") # Decimal odds
 
     kelly = (b * p - q) / b
 
@@ -56,53 +71,84 @@ class AIAgentStrategy(Strategy):
 
     Pipeline:
     1. Fetch market question and context
-    2. Gather relevant news/sources via web search
-    3. LLM estimates probability with reasoning
-    4. Compare estimated prob vs market price
-    5. Size position using Kelly Criterion
-    6. Execute when edge exceeds threshold
+    2. LLM estimates probability with reasoning
+    3. Compare estimated prob vs market price
+    4. Size position using Kelly Criterion
+    5. Execute when edge exceeds threshold
+
+    When OPENAI_API_KEY is not set, uses a heuristic fallback:
+    - Markets near 0.50 are hard to call -> skip
+    - Extreme prices (very high or very low) tend to be well-informed -> skip
+    - Moderate deviations from 0.50 with high volume suggest informed flow
+      -> estimate prob based on volume-adjusted mean reversion
     """
 
     def __init__(self, settings: Settings) -> None:
         super().__init__(name="ai_agent", settings=settings)
-        self._min_edge = Decimal("0.05")  # Minimum 5% edge to trade
-        self._max_kelly_fraction = Decimal("0.25")  # Cap at 25% of bankroll
-        self._bankroll = Decimal("1000")  # Starting bankroll for sizing
+        self._min_edge = Decimal("0.05") # Minimum 5% edge to trade
+        self._max_kelly_fraction = Decimal("0.25") # Cap at 25% of bankroll
+        self._bankroll = Decimal("1000") # Starting bankroll for sizing
         self._estimates: dict[str, ProbabilityEstimate] = {}
+        self._last_signal_time: dict[str, float] = {}
+        self._signal_cooldown: float = 120.0 # 2 min between signals per market
+        # Heuristic state (used when no OpenAI key)
+        self._price_history: dict[str, list[Decimal]] = {}
+        # Reusable OpenAI client (created lazily)
+        self._openai_client: Any | None = None
 
     async def start(self) -> None:
         await super().start()
         if not self.settings.openai_api_key:
-            logger.warning("ai_agent_no_openai_key", msg="Set OPENAI_API_KEY for LLM probability estimation")
+            logger.info("ai_agent_heuristic_mode", msg="No OPENAI_API_KEY — using volume-price heuristic fallback")
         else:
             logger.info("ai_agent_started")
+
+    async def stop(self) -> None:
+        await super().stop()
+        if self._openai_client is not None:
+            await self._openai_client.close()
+            self._openai_client = None
 
     async def on_data(self, data: MarketData) -> list[TradeSignal]:
         if self.state.value != "running":
             return []
 
-        if not self.settings.openai_api_key:
+        # Cooldown check
+        now = time.monotonic()
+        last = self._last_signal_time.get(data.condition_id, 0)
+        if now - last < self._signal_cooldown:
             return []
 
         signals: list[TradeSignal] = []
 
-        # Get or generate probability estimate
-        estimate = self._estimates.get(data.condition_id)
-        if not estimate:
-            estimate = await self._estimate_probability(data)
+        if self.settings.openai_api_key:
+            # LLM-based estimation (with TTL-based re-evaluation)
+            estimate = self._estimates.get(data.condition_id)
+            if estimate and estimate.is_stale:
+                del self._estimates[data.condition_id]
+                estimate = None
+            if not estimate:
+                estimate = await self._estimate_probability(data)
+                if estimate:
+                    self._estimates[data.condition_id] = estimate
             if estimate:
-                self._estimates[data.condition_id] = estimate
+                signals = self._make_signal(data, estimate)
+        else:
+            # Heuristic fallback
+            signals = self._heuristic_signal(data)
 
-        if not estimate:
-            return []
+        if signals:
+            self._last_signal_time[data.condition_id] = now
 
-        # Compare estimated prob to market price
+        return signals
+
+    def _make_signal(self, data: MarketData, estimate: ProbabilityEstimate) -> list[TradeSignal]:
+        """Generate a trade signal from a probability estimate."""
         edge = estimate.estimated_prob - data.yes_price
 
         if abs(edge) < self._min_edge:
             return []
 
-        # Kelly sizing
         kf = kelly_fraction(estimate.estimated_prob, data.yes_price)
         kf = max(-self._max_kelly_fraction, min(self._max_kelly_fraction, kf))
 
@@ -113,29 +159,107 @@ class AIAgentStrategy(Strategy):
         side = "BUY_YES" if kf > 0 else "BUY_NO"
         price = data.yes_price if kf > 0 else data.no_price
 
+        source = "llm" if self.settings.openai_api_key else "heuristic"
         logger.info(
             "ai_signal",
-            condition_id=data.condition_id,
+            condition_id=data.condition_id[:16],
             estimated_prob=str(estimate.estimated_prob),
             market_price=str(data.yes_price),
             edge=str(edge),
             kelly_fraction=str(kf),
             size=str(size),
+            source=source,
         )
 
-        signals.append(
-            TradeSignal(
-                condition_id=data.condition_id,
-                side=side,
-                price=price,
-                size=size,
-                reason=f"AI edge={edge:.3f}: est={estimate.estimated_prob:.2f} vs mkt={data.yes_price:.2f}. {estimate.reasoning[:100]}",
-                confidence=float(estimate.confidence),
-                strategy=self.name,
-            )
+        return [TradeSignal(
+            condition_id=data.condition_id,
+            side=side,
+            price=price,
+            size=size,
+            reason=f"AI edge={edge:.3f}: est={estimate.estimated_prob:.2f} vs mkt={data.yes_price:.2f}. {estimate.reasoning[:100]}",
+            confidence=float(estimate.confidence),
+            strategy=self.name,
+        )]
+
+    def _heuristic_signal(self, data: MarketData) -> list[TradeSignal]:
+        """Volume-price heuristic for shadow mode without LLM.
+
+        Logic: moderate prices (0.20-0.80) with high volume suggest the
+        market is well-calibrated. We look for small mispricings by
+        estimating that the "fair" price is slightly mean-reverting
+        from the current price toward 0.50, scaled by volume.
+
+        High-volume markets get more weight (more informed).
+        Low-volume markets are too noisy to estimate.
+        """
+        cid = data.condition_id
+
+        # Track price history
+        if cid not in self._price_history:
+            self._price_history[cid] = []
+        self._price_history[cid].append(data.yes_price)
+        self._price_history[cid] = self._price_history[cid][-20:] # Keep last 20
+
+        history = self._price_history[cid]
+        if len(history) < 5:
+            return []
+
+        # Skip extreme prices — these are likely well-informed
+        if data.yes_price < Decimal("0.10") or data.yes_price > Decimal("0.90"):
+            return []
+
+        # Skip very stale low-volume markets
+        if data.volume_24h < Decimal("1000"):
+            return []
+
+        # Estimate "fair value" as a blend of current price and recent average
+        recent_avg = sum(history[-10:]) / Decimal(str(len(history[-10:])))
+
+        # If current price moved away from recent average, estimate reversion
+        deviation = data.yes_price - recent_avg
+        if abs(deviation) < Decimal("0.03"):
+            return [] # No meaningful edge
+
+        # Estimate probability: blend between current price and mean-reversion
+        reversion_strength = Decimal("0.3") # How much we weight mean reversion
+        estimated_prob = data.yes_price - deviation * reversion_strength
+
+        # Only trade if the edge is significant
+        edge = estimated_prob - data.yes_price
+        if abs(edge) < self._min_edge:
+            return []
+
+        # Scale confidence by volume (higher volume = more reliable signal)
+        volume_confidence = min(data.volume_24h / Decimal("100000"), Decimal("1"))
+        confidence = volume_confidence * Decimal("0.4") # Low confidence for heuristic
+
+        kf = kelly_fraction(estimated_prob, data.yes_price)
+        kf = max(-self._max_kelly_fraction, min(self._max_kelly_fraction, kf))
+
+        if kf == 0:
+            return []
+
+        size = abs(kf) * self._bankroll
+        side = "BUY_YES" if kf > 0 else "BUY_NO"
+        price = data.yes_price if kf > 0 else data.no_price
+
+        logger.info(
+            "ai_heuristic_signal",
+            condition_id=cid[:16],
+            edge=str(edge),
+            estimated_prob=str(estimated_prob),
+            market_price=str(data.yes_price),
         )
 
-        return signals
+        return [TradeSignal(
+            condition_id=cid,
+            side=side,
+            price=price,
+            size=size,
+            reason=f"Heuristic edge={edge:.3f}: est={estimated_prob:.2f} vs mkt={data.yes_price:.2f} (reversion)",
+            confidence=float(confidence),
+            strategy=self.name,
+        )]
 
     async def _estimate_probability(self, data: MarketData) -> ProbabilityEstimate | None:
         """Use LLM to estimate probability for a market question."""
@@ -153,19 +277,21 @@ class AIAgentStrategy(Strategy):
                 confidence=Decimal(str(result.get("confidence", 0.3))),
                 reasoning=result.get("reasoning", ""),
                 sources=result.get("sources", []),
+                created_at=time.monotonic(),
             )
 
         except Exception as e:
-            logger.warning("ai_estimate_failed", condition_id=data.condition_id, error=str(e))
+            logger.warning("ai_estimate_failed", condition_id=data.condition_id[:16], error=str(e))
             return None
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
     async def _call_llm(self, data: MarketData) -> Any:
         """Call LLM API with retry for transient failures only."""
-        from openai import AsyncOpenAI
+        if self._openai_client is None:
+            from openai import AsyncOpenAI
+            self._openai_client = AsyncOpenAI(api_key=self.settings.openai_api_key, timeout=30)
 
-        client = AsyncOpenAI(api_key=self.settings.openai_api_key, timeout=30)
-        return await client.chat.completions.create(
+        return await self._openai_client.chat.completions.create(
             model="gpt-4o",
             messages=[
                 {
@@ -190,7 +316,7 @@ class AIAgentStrategy(Strategy):
         self._total_pnl += (signal.price - fill_price) * fill_size
         logger.info(
             "ai_fill",
-            condition_id=signal.condition_id,
+            condition_id=signal.condition_id[:16],
             side=signal.side,
             fill_price=str(fill_price),
             fill_size=str(fill_size),

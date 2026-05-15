@@ -24,7 +24,8 @@
 ## Phase 3: Backtesting & Validation
 - [x] `src/backtesting/harness.py` -- Lightweight backtest harness with Sharpe ratio calculation
 - [x] `src/backtesting/data_loader.py` -- Historical data fetcher from Polymarket API
-- [ ] Backtest each strategy on real historical data, record PnL, Sharpe, max drawdown (needs CLOB API key)
+- [x] CLOB API auth code in data_loader (uses py-clob-client when key available, Gamma fallback otherwise)
+- [ ] Backtest each strategy on real historical data, record PnL, Sharpe, max drawdown (needs POLYMARKET_API_KEY in .env)
 - [x] Walk-forward validation for strategies with ML components
 - [x] Shadow trading mode -- SHADOW_MODE flag connects to live data but paper-trades only
 
@@ -54,10 +55,17 @@
 - [x] docker-compose.yml with app service + infrastructure
 - [x] render.yaml for PaaS deployment
 - [x] .dockerignore
+- [x] Multi-stage Docker build (no Node.js in runtime, HEALTHCHECK added)
+- [x] Prometheus volume persistence in docker-compose
+- [x] Expanded .dockerignore (tests/, docs/, *.md excluded)
+- [x] render.yaml with all secret env vars + risk limits
 - [ ] Docker build test on cloud host
 - [ ] Render deploy
 
 ## Review
-- Phases 1-5 complete. Phase 6 configs ready, pending cloud test.
-- 44 tests passing. 4/6 strategies fire in shadow mode (weather + ai_agent need API keys/specific markets).
+- Phases 1-5 complete. Phase 6 configs hardened, pending cloud test.
+- 53 tests passing. 4/6 strategies fire in shadow mode.
+- Weather strategy code fixed (metadata enrichment + rain auto-detect) — needs --include-weather verification.
+- AI agent heuristic works; LLM mode ready when OPENAI_API_KEY set.
+- DataFeed now enriches WS data with question text via prefetch_metadata().
 - Shadow mode verified stable for 30+ minutes with live data.

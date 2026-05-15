@@ -32,6 +32,12 @@ services:
           name: polymarket-redis
           type: redis
           property: host
+      - key: REDIS_PORT
+        fromService:
+          name: polymarket-redis
+          type: redis
+          property: port
+      # Secret env vars — set manually in Render dashboard
       - key: LIVE_MODE
         sync: false
       - key: SHADOW_MODE
@@ -44,6 +50,33 @@ services:
         sync: false
       - key: OPENAI_API_KEY
         sync: false
+      - key: POLYGON_WALLET_ADDRESS
+        sync: false
+      - key: POLYGON_WALLET_PRIVATE_KEY
+        sync: false
+      - key: KALSHI_API_KEY
+        sync: false
+      - key: KALSHI_API_SECRET
+        sync: false
+      - key: BINANCE_API_KEY
+        sync: false
+      - key: BINANCE_API_SECRET
+        sync: false
+      - key: COINBASE_API_KEY
+        sync: false
+      - key: COINBASE_API_SECRET
+        sync: false
+      # Risk limits — safe defaults, override in dashboard if needed
+      - key: MAX_DAILY_LOSS_PCT
+        value: "5"
+      - key: MAX_MONTHLY_LOSS_PCT
+        value: "15"
+      - key: MAX_DRAWDOWN_PCT
+        value: "25"
+      - key: MAX_POSITION_SIZE_USD
+        value: "500"
+      - key: MAX_TOTAL_EXPOSURE_USD
+        value: "5000"
 
 databases:
   - name: polymarket-db

@@ -26,6 +26,7 @@ class DataFeed:
             timeout=settings.order_timeout_seconds,
         )
         self._ws_url = settings.clob_ws_url
+        self._token_metadata: dict[str, dict] = {}  # token_id -> {question, condition_id, ...}
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
     async def get_markets(self, limit: int = 100, offset: int = 0) -> list[dict]:
@@ -40,6 +41,64 @@ class DataFeed:
             )
             resp.raise_for_status()
             return resp.json()
+
+    async def prefetch_metadata(self, token_ids: list[str]) -> None:
+        """Pre-fetch market metadata from Gamma API so WebSocket data can be enriched.
+
+        The CLOB WebSocket only sends price/orderbook data (no question text).
+        We query Gamma /markets to get question, condition_id, and group them
+        by clob token ID so on_data callbacks receive meaningful question text.
+        """
+        if not token_ids:
+            return
+
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.settings.gamma_api_url,
+                timeout=self.settings.order_timeout_seconds,
+            ) as client:
+                # Fetch enough markets to cover our token_ids
+                batch_size = 100
+                offset = 0
+                found = 0
+                needed = set(token_ids)
+
+                while needed and offset < 1000:
+                    resp = await client.get(
+                        "/markets",
+                        params={"limit": batch_size, "offset": offset, "closed": False},
+                    )
+                    if resp.status_code != 200:
+                        break
+                    markets = resp.json()
+                    if not markets:
+                        break
+
+                    for m in markets:
+                        raw = m.get("clobTokenIds", "[]")
+                        ids = json.loads(raw) if isinstance(raw, str) else raw
+                        question = m.get("question", "")
+                        condition_id = m.get("condition_id", "")
+
+                        for tid in ids:
+                            if tid in needed:
+                                self._token_metadata[tid] = {
+                                    "question": question,
+                                    "condition_id": condition_id,
+                                }
+                                needed.discard(tid)
+                                found += 1
+
+                    offset += batch_size
+
+                logger.info("metadata_prefetched", requested=len(token_ids), found=found)
+
+        except Exception as e:
+            logger.warning("metadata_prefetch_failed", error=str(e))
+
+    def _enrich_from_metadata(self, asset_id: str) -> dict:
+        """Get metadata for a token_id from the prefetched cache."""
+        return self._token_metadata.get(asset_id, {})
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
     async def get_market(self, condition_id: str) -> dict:
@@ -154,9 +213,11 @@ class DataFeed:
             mid = (best_bid + best_ask) / Decimal("2") if (best_bid > 0 and best_ask > 0) else (best_bid or best_ask)
             spread = (best_ask - best_bid) if (best_bid > 0 and best_ask > 0) else Decimal("0")
 
+            meta = self._enrich_from_metadata(asset_id)
+
             return MarketData(
-                condition_id=asset_id,
-                question="",
+                condition_id=meta.get("condition_id") or asset_id,
+                question=meta.get("question", ""),
                 yes_price=mid,
                 no_price=Decimal("1") - mid,
                 spread=spread,
@@ -191,9 +252,11 @@ class DataFeed:
             if mid <= 0 or mid > Decimal("1"):
                 return None
 
+            meta = self._enrich_from_metadata(asset_id)
+
             return MarketData(
-                condition_id=asset_id,
-                question="",
+                condition_id=meta.get("condition_id") or asset_id,
+                question=meta.get("question", ""),
                 yes_price=mid,
                 no_price=Decimal("1") - mid,
                 spread=spread,

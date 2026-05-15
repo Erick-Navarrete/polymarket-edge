@@ -4,10 +4,11 @@ Connects to the live WebSocket feed, feeds real-time market data to all strategi
 but executes only paper trades. Reports all generated signals and paper P&L.
 
 Usage:
-    python scripts/shadow_run.py                        # Run for 5 minutes
+    python scripts/shadow_run.py                         # Run for 5 minutes
     python scripts/shadow_run.py --duration 300          # Run for 5 minutes (seconds)
-    python scripts/shadow_run.py --strategy weather      # Only weather strategy
-    python scripts/shadow_run.py --top-markets 10        # Subscribe to top 10 markets
+    python scripts/shadow_run.py --strategy weather       # Only weather strategy
+    python scripts/shadow_run.py --top-markets 10         # Subscribe to top 10 markets
+    python scripts/shadow_run.py --include-weather        # Also discover weather markets
 
 No live trading — SHADOW_MODE=true always. All trades are paper.
 """
@@ -30,7 +31,7 @@ from src.strategies.market_making import MarketMakingStrategy
 from src.strategies.copy_trading import CopyTradingStrategy
 from src.strategies.crypto_15m import Crypto15mStrategy
 from src.strategies.ai_agent import AIAgentStrategy
-from src.strategies.weather import WeatherStrategy
+from src.strategies.weather import WeatherStrategy, WeatherForecast
 
 logger = structlog.get_logger()
 
@@ -47,14 +48,122 @@ async def discover_active_tokens(top_n: int = 10) -> list[str]:
         resp.raise_for_status()
         markets = resp.json()
 
-    token_ids = []
-    for m in markets:
-        raw = m.get("clobTokenIds", "[]")
-        ids = json.loads(raw) if isinstance(raw, str) else raw
-        if ids:
-            token_ids.append(ids[0])  # YES token
+        token_ids = []
+        for m in markets:
+            raw = m.get("clobTokenIds", "[]")
+            ids = json.loads(raw) if isinstance(raw, str) else raw
+            if ids:
+                token_ids.append(ids[0])  # YES token
 
-    return token_ids
+        return token_ids
+
+
+async def discover_weather_tokens(n: int = 5) -> list[tuple[str, str, str]]:
+    """Discover weather market tokens from the Gamma /events endpoint.
+
+    Returns list of (token_id, question, condition_id) tuples for weather markets.
+    Uses event-level tags and series fields since /markets doesn't
+    support category filtering.
+    """
+    weather_tokens: list[tuple[str, str, str]] = []
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.get(
+            f"{GAMMA_API}/events",
+            params={"limit": 100, "closed": False, "order": "volume", "ascending": False},
+        )
+        resp.raise_for_status()
+        events = resp.json()
+
+        for event in events:
+            is_weather = False
+            tags = event.get("tags", [])
+            if isinstance(tags, list):
+                for tag in tags:
+                    label = tag.get("label", "") if isinstance(tag, dict) else str(tag)
+                    if label in ("Weather", "Daily Temperature", "Wildfire"):
+                        is_weather = True
+                        break
+
+            series = event.get("series", "") or event.get("seriesSlug", "")
+            if isinstance(series, str) and "weather" in series.lower():
+                is_weather = True
+
+            if not is_weather:
+                continue
+
+            for market in event.get("markets", []):
+                raw = market.get("clobTokenIds", "[]")
+                ids = json.loads(raw) if isinstance(raw, str) else raw
+                question = market.get("question", "")
+                condition_id = market.get("condition_id", "")
+                if ids:
+                    weather_tokens.append((ids[0], question, condition_id))
+
+            if len(weather_tokens) >= n:
+                break
+
+    return weather_tokens[:n]
+
+
+def make_forecast_from_question(question: str) -> WeatherForecast | None:
+    """Create a WeatherForecast by parsing a temperature question.
+
+    Weather markets on Polymarket follow the pattern:
+    "Will the highest temperature in NYC be between 76-77F on May 16?"
+    We parse the temperature range and estimate probability from a
+    climatological baseline.
+    """
+    import re
+    q = question.lower()
+
+    # Temperature range: "between 76-77F"
+    range_match = re.search(r"between\s+(\d+)\s*-\s*(\d+)\s*", q)
+    # Single threshold: "exceed 85F"
+    exceed_match = re.search(r"(?:exceed|above|higher than)\s+(\d+)\s*", q)
+
+    if range_match:
+        low_f = int(range_match.group(1))
+        high_f = int(range_match.group(2))
+        mid = (low_f + high_f) / 2
+    elif exceed_match:
+        mid = int(exceed_match.group(1))
+    else:
+        return None
+
+    # Determine location from question (simplified: default to NYC baseline)
+    # NYC May average high: ~72F, std dev ~8F
+    avg_high = Decimal("72")
+    std_dev = Decimal("8")
+
+    if "london" in q:
+        avg_high = Decimal("64")
+        std_dev = Decimal("6")
+    elif "tokyo" in q:
+        avg_high = Decimal("76")
+        std_dev = Decimal("7")
+    elif "austin" in q or "houston" in q or "dallas" in q or "miami" in q:
+        avg_high = Decimal("88")
+        std_dev = Decimal("8")
+
+    threshold = Decimal(str(mid))
+    diff = avg_high - threshold
+    z_score = diff / std_dev
+
+    # Rough probability estimate from normal CDF approximation
+    if z_score > Decimal("3"):
+        est_prob = Decimal("0.99")
+    elif z_score < Decimal("-3"):
+        est_prob = Decimal("0.01")
+    else:
+        est_prob = Decimal("0.5") + z_score * Decimal("0.2")
+        est_prob = max(Decimal("0.01"), min(Decimal("0.99"), est_prob))
+
+    return WeatherForecast(
+        location="auto-detected",
+        high_temp_f=avg_high,
+        precipitation_prob=None,
+        source="climatology_baseline",
+    )
 
 
 class SignalCollector:
@@ -125,6 +234,7 @@ async def shadow_run(
     duration: int = 300,
     strategy_filter: str | None = None,
     top_markets: int = 10,
+    include_weather: bool = False,
 ) -> SignalCollector:
     """Run the engine in shadow mode for a fixed duration."""
     settings = Settings(live_mode=False, shadow_mode=True)
@@ -134,6 +244,18 @@ async def shadow_run(
     print(f"Discovering top {top_markets} active markets...")
     token_ids = await discover_active_tokens(top_markets)
     print(f"Found {len(token_ids)} tokens to monitor")
+
+    # Discover weather tokens if requested
+    weather_tokens: list[tuple[str, str, str]] = []
+    if include_weather:
+        print("Discovering weather markets...")
+        weather_tokens = await discover_weather_tokens(5)
+        print(f"Found {len(weather_tokens)} weather tokens")
+        weather_token_ids = [t[0] for t in weather_tokens]
+        # Add weather tokens that aren't already in the list
+        for tid in weather_token_ids:
+            if tid not in token_ids:
+                token_ids.append(tid)
 
     if not token_ids:
         print("No active markets found. Exiting.")
@@ -159,6 +281,26 @@ async def shadow_run(
             continue
         engine.add_strategy(factory())
 
+    # Pre-populate weather strategy forecasts for discovered weather markets
+    if include_weather and weather_tokens:
+        weather_strat = engine._strategies.get("weather")
+        if weather_strat:
+ for token_id, question, condition_id in weather_tokens:
+ forecast = make_forecast_from_question(question)
+ if forecast:
+ # Key by condition_id (matches MarketData.condition_id from WS)
+ key = condition_id or token_id
+ weather_strat.update_forecast(key, forecast)
+ # Also key by token_id as fallback in case condition_id comes as asset_id
+ if condition_id and condition_id != token_id:
+ weather_strat.update_forecast(token_id, forecast)
+ print(f"  Weather forecast set: {question[:60]}...")
+
+ # Pre-fetch market metadata so WebSocket data includes question text
+ print("Pre-fetching market metadata from Gamma API...")
+ await data_feed.prefetch_metadata(token_ids)
+ print(f"Metadata cached for {len(data_feed._token_metadata)} tokens")
+
     # Monkey-patch engine to collect signals
     original_process = engine._process_market_data
 
@@ -182,6 +324,7 @@ async def shadow_run(
     print(f"\nStarting shadow mode for {duration}s...")
     print(f"Mode: SHADOW (live data, paper execution)")
     print(f"Strategies: {list(engine._strategies.keys())}")
+    print(f"Markets: {len(token_ids)} total")
     print(f"Equity: $1000")
     print("=" * 70)
 
@@ -212,9 +355,9 @@ def print_report(collector: SignalCollector) -> None:
     print("\n" + "=" * 70)
     print("Shadow Mode Results")
     print("=" * 70)
-    print(f"Duration:        {s['duration_sec']}s")
-    print(f"Data points:     {s['data_points']}")
-    print(f"Total signals:   {s['total_signals']}")
+    print(f"Duration: {s['duration_sec']}s")
+    print(f"Data points: {s['data_points']}")
+    print(f"Total signals: {s['total_signals']}")
     print(f"Total paper fills: {s['total_fills']}")
     print(f"Total paper PnL: ${s['total_pnl']}")
 
@@ -243,7 +386,7 @@ def print_report(collector: SignalCollector) -> None:
     print("=" * 70 + "\n")
 
 
-async def main(duration: int, strategy: str | None, top_markets: int) -> None:
+async def main(duration: int, strategy: str | None, top_markets: int, include_weather: bool) -> None:
     structlog.configure(
         processors=[
             structlog.processors.TimeStamper(fmt="iso"),
@@ -256,6 +399,7 @@ async def main(duration: int, strategy: str | None, top_markets: int) -> None:
         duration=duration,
         strategy_filter=strategy,
         top_markets=top_markets,
+        include_weather=include_weather,
     )
     print_report(collector)
 
@@ -275,5 +419,9 @@ if __name__ == "__main__":
         "--top-markets", type=int, default=10,
         help="Number of top-volume markets to subscribe to (default: 10)",
     )
+    parser.add_argument(
+        "--include-weather", action="store_true",
+        help="Also discover and subscribe to weather markets",
+    )
     args = parser.parse_args()
-    asyncio.run(main(args.duration, args.strategy, args.top_markets))
+    asyncio.run(main(args.duration, args.strategy, args.top_markets, args.include_weather))

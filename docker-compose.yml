@@ -6,7 +6,9 @@ services:
     env_file: .env
     environment:
       POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
       REDIS_HOST: redis
+      REDIS_PORT: 6379
     depends_on:
       postgres:
         condition: service_healthy
@@ -61,7 +63,9 @@ services:
       - "9090:9090"
     volumes:
       - ./scripts/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
 
 volumes:
   pgdata:
   grafana-storage:
+  prometheus-data:
