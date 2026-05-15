@@ -215,13 +215,18 @@ async def test_strategy_pause_resume():
     signals = await strategy.on_data(data)
     assert len(signals) > 0
 
-    # Paused — no signals
+    # Paused - no signals
     await strategy.pause()
     assert await strategy.on_data(data) == []
 
-    # Resumed — signals again
+    # Resumed - signals again (use different condition_id to avoid cooldown)
     await strategy.resume()
-    signals = await strategy.on_data(data)
+    data_after_resume = make_market_data(
+        condition_id="0xtest_resumed",
+        yes=Decimal("0.45"),
+        no=Decimal("0.50"),
+    )
+    signals = await strategy.on_data(data_after_resume)
     assert len(signals) > 0
 
     await strategy.stop()

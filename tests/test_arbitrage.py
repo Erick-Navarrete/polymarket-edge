@@ -7,6 +7,7 @@ from src.core.config import Settings
 from src.core.data_feed import DataFeed
 from src.core.strategy_base import MarketData
 from src.strategies.arbitrage import ArbitrageStrategy
+import time
 
 
 @pytest.fixture
@@ -108,3 +109,77 @@ async def test_cross_platform_arb(strategy):
     # Should generate a SELL_YES signal (PM overpriced)
     assert len(signals) > 0
     assert any(s.side == "SELL_YES" for s in signals)
+
+
+@pytest.mark.asyncio
+async def test_mean_reversion_extreme_high(settings, data_feed):
+    """Mean-reversion should buy NO when YES price is extremely high (>=0.95)."""
+    # Use fresh strategy with no cooldown interference
+    s = ArbitrageStrategy(settings, data_feed)
+    s._signal_cooldown = 0  # Disable cooldown for test
+    await s.start()
+
+    # Feed 3+ data points to satisfy the min observation count
+    for _ in range(3):
+        data = MarketData(
+            condition_id="0xextreme1",
+            question="Is X certain?",
+            yes_price=Decimal("0.96"),
+            no_price=Decimal("0.04"),
+            spread=Decimal("0.02"),
+            volume_24h=Decimal("1000"),
+            timestamp=1000.0,
+        )
+        signals = await s.on_data(data)
+
+    # Should detect mean-reversion and suggest buying NO
+    assert len(signals) > 0
+    assert signals[0].side == "BUY_NO"
+    await s.stop()
+
+
+@pytest.mark.asyncio
+async def test_mean_reversion_extreme_low(settings, data_feed):
+    """Mean-reversion should buy YES when YES price is extremely low (<=0.05)."""
+    s = ArbitrageStrategy(settings, data_feed)
+    s._signal_cooldown = 0
+    await s.start()
+
+    for _ in range(3):
+        data = MarketData(
+            condition_id="0xextreme2",
+            question="Is X impossible?",
+            yes_price=Decimal("0.03"),
+            no_price=Decimal("0.97"),
+            spread=Decimal("0.02"),
+            volume_24h=Decimal("1000"),
+            timestamp=1000.0,
+        )
+        signals = await s.on_data(data)
+
+    assert len(signals) > 0
+    assert signals[0].side == "BUY_YES"
+    await s.stop()
+
+
+@pytest.mark.asyncio
+async def test_arb_cooldown(settings, data_feed):
+    """Rapid on_data calls should be throttled by cooldown."""
+    s = ArbitrageStrategy(settings, data_feed)
+    s._signal_cooldown = 60.0  # Long cooldown
+    await s.start()
+
+    data = MarketData(
+        condition_id="0xarb_cool",
+        question="Test?",
+        yes_price=Decimal("0.45"),
+        no_price=Decimal("0.50"),
+        spread=Decimal("0.05"),
+        volume_24h=Decimal("1000"),
+        timestamp=1000.0,
+    )
+    signals1 = await s.on_data(data)
+    assert len(signals1) == 2  # Internal arb detected
+    signals2 = await s.on_data(data)
+    assert len(signals2) == 0  # Blocked by cooldown
+    await s.stop()

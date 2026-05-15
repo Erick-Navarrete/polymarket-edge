@@ -20,7 +20,7 @@ class BandsConfig:
         max_position: Decimal = Decimal("100"),
         recenter_speed: Decimal = Decimal("0.5"),  # How fast to adjust to midpoint moves
         min_spread: Decimal = Decimal("0.01"),  # Minimum 1 cent spread
-        signal_cooldown_seconds: float = 5.0,  # Min time between signals per market
+        signal_cooldown_seconds: float = 15.0,  # Min time between signals per market
     ) -> None:
         self.spread_bps = spread_bps
         self.order_size = order_size

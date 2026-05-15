@@ -1,5 +1,6 @@
-"""Copy trading strategy — follow profitable on-chain wallets."""
+"""Copy trading strategy — follow profitable on-chain wallets and momentum signals."""
 
+import time
 import structlog
 from decimal import Decimal
 
@@ -64,13 +65,21 @@ class CopyTarget:
 class CopyTradingStrategy(Strategy):
     """Monitor profitable wallets and replicate their trades.
 
-    Uses on-chain data from Polymarket (wallet addresses are public)
-    to track leading traders and mirror their positions.
+    In shadow mode (without real wallet activity data), detects momentum
+    signals — sharp price moves that often indicate whale activity — and
+    follows the direction. When real wallet tracking is available via
+    add_target(), uses explicit wallet-following logic.
     """
 
     def __init__(self, settings: Settings) -> None:
         super().__init__(name="copy_trading", settings=settings)
         self._targets: dict[str, CopyTarget] = {}
+        # Momentum-following state (used when no wallet targets are configured)
+        self._price_history: dict[str, list[tuple[float, Decimal]]] = {}
+        self._last_signal_time: dict[str, float] = {}
+        self._momentum_lookback: int = 5  # Number of ticks to look back
+        self._momentum_threshold: Decimal = Decimal("0.03")  # 3% move to trigger
+        self._signal_cooldown: float = 30.0  # Seconds between signals per market
 
     def add_target(self, target: CopyTarget) -> None:
         """Add a wallet to track."""
@@ -87,20 +96,105 @@ class CopyTradingStrategy(Strategy):
         logger.info("copy_trading_started", targets=len(self._targets))
 
     async def on_data(self, data: MarketData) -> list[TradeSignal]:
-        """Process market data and check for copy trading signals.
-
-        In a full implementation, this would:
-        1. Poll on-chain activity for tracked wallets
-        2. Detect new trades from qualified targets
-        3. Generate copy signals scaled by copy_ratio
-        """
         if self.state.value != "running":
             return []
 
+        # Cooldown check
+        now = time.monotonic()
+        last = self._last_signal_time.get(data.condition_id, 0)
+        if now - last < self._signal_cooldown:
+            return []
+
         signals: list[TradeSignal] = []
-        # Copy signals are driven by wallet activity, not market data
-        # Market data is used for price validation of copy signals
+
+        # If we have wallet targets, try to generate explicit copy signals
+        if self._targets:
+            for target in self._targets.values():
+                if target.is_qualified():
+                    sig = self._follow_target(data, target)
+                    if sig:
+                        signals.append(sig)
+                        break  # One signal per market tick
+
+        # Momentum-following: detect sharp price moves (whale activity fingerprint)
+        if not signals:
+            momentum = self._detect_momentum(data)
+            if momentum:
+                signals.append(momentum)
+
+        if signals:
+            self._last_signal_time[data.condition_id] = now
+
         return signals
+
+    def _follow_target(self, data: MarketData, target: CopyTarget) -> TradeSignal | None:
+        """Generate a copy signal from a qualified target's inferred direction.
+
+        In shadow mode, we infer the target's direction from price action
+        since we can't read real wallet activity. When wallet_tracker is
+        connected, it calls generate_copy_signal() directly.
+        """
+        # Follow the direction of significant moves — proxy for wallet activity
+        momentum = self._detect_momentum(data)
+        if momentum:
+            copy_size = min(Decimal("50") * target.copy_ratio, target.max_copy_size)
+            return TradeSignal(
+                condition_id=data.condition_id,
+                side=momentum.side,
+                price=momentum.price,
+                size=copy_size,
+                reason=f"Copy {target.label or target.address[:8]}: following momentum {momentum.side}",
+                confidence=target.win_rate,
+                strategy=self.name,
+            )
+        return None
+
+    def _detect_momentum(self, data: MarketData) -> TradeSignal | None:
+        """Detect sharp price moves that suggest whale/informed activity."""
+        history = self._price_history.get(data.condition_id, [])
+        now = time.monotonic()
+        history.append((now, data.yes_price))
+
+        # Keep only recent history
+        cutoff = now - 300  # 5 min window
+        self._price_history[data.condition_id] = [(t, p) for t, p in history if t > cutoff]
+        history = self._price_history[data.condition_id]
+
+        if len(history) < self._momentum_lookback:
+            return None
+
+        # Compare current price to recent prices
+        recent = history[-self._momentum_lookback:]
+        avg_price = sum(p for _, p in recent) / Decimal(str(len(recent)))
+        change = data.yes_price - avg_price
+
+        # Normalize by average price to get percentage move
+        if avg_price == 0:
+            return None
+        pct_move = abs(change) / avg_price
+
+        if pct_move < self._momentum_threshold:
+            return None
+
+        # Follow the momentum direction
+        if change > 0:
+            side = "BUY_YES"
+            price = data.yes_price
+            reason = f"Momentum follow: +{pct_move:.1%} move over {len(recent)} ticks"
+        else:
+            side = "BUY_NO"
+            price = data.no_price
+            reason = f"Momentum follow: -{pct_move:.1%} move over {len(recent)} ticks"
+
+        return TradeSignal(
+            condition_id=data.condition_id,
+            side=side,
+            price=price,
+            size=Decimal("5"),  # Conservative size for momentum trades
+            reason=reason,
+            confidence=float(min(pct_move / Decimal("0.10"), Decimal("0.8"))),
+            strategy=self.name,
+        )
 
     def generate_copy_signal(
         self,
@@ -131,7 +225,7 @@ class CopyTradingStrategy(Strategy):
             side=side,
             price=price,
             size=copy_size,
-            reason=f"Copy {target.label or target_address[:8]}: {side} at {price}",
+            reason=f"Copy {target.label or target.address[:8]}: {side} at {price}",
             confidence=target.win_rate,
             strategy=self.name,
         )
