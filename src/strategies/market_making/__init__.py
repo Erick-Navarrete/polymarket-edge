@@ -1,5 +1,6 @@
 """Market making strategy — bands strategy on the Polymarket CLOB."""
 
+import time
 import structlog
 from decimal import Decimal
 
@@ -19,12 +20,14 @@ class BandsConfig:
         max_position: Decimal = Decimal("100"),
         recenter_speed: Decimal = Decimal("0.5"),  # How fast to adjust to midpoint moves
         min_spread: Decimal = Decimal("0.01"),  # Minimum 1 cent spread
+        signal_cooldown_seconds: float = 5.0,  # Min time between signals per market
     ) -> None:
         self.spread_bps = spread_bps
         self.order_size = order_size
         self.max_position = max_position
         self.recenter_speed = recenter_speed
         self.min_spread = min_spread
+        self.signal_cooldown_seconds = signal_cooldown_seconds
 
         # Derived
         self.half_spread = Decimal(spread_bps) / Decimal("20000")  # Convert bps to decimal
@@ -43,6 +46,7 @@ class MarketMakingStrategy(Strategy):
         self.config = config or BandsConfig()
         self._inventory: dict[str, Decimal] = {}  # condition_id -> net position
         self._last_midpoint: dict[str, Decimal] = {}
+        self._last_signal_time: dict[str, float] = {}  # condition_id -> timestamp
 
     async def start(self) -> None:
         await super().start()
@@ -50,6 +54,7 @@ class MarketMakingStrategy(Strategy):
             "market_making_started",
             spread_bps=self.config.spread_bps,
             order_size=str(self.config.order_size),
+            cooldown=self.config.signal_cooldown_seconds,
         )
 
     async def on_data(self, data: MarketData) -> list[TradeSignal]:
@@ -58,6 +63,12 @@ class MarketMakingStrategy(Strategy):
 
         midpoint = (data.yes_price + data.no_price) / Decimal("2")
         self._last_midpoint[data.condition_id] = midpoint
+
+        # Cooldown: skip if we signaled for this market too recently
+        now = time.monotonic()
+        last = self._last_signal_time.get(data.condition_id, 0)
+        if now - last < self.config.signal_cooldown_seconds:
+            return []
 
         # Skip if spread is too thin (no room for our quotes)
         if data.spread < self.config.min_spread:
@@ -104,6 +115,9 @@ class MarketMakingStrategy(Strategy):
                     strategy=self.name,
                 )
             )
+
+        if signals:
+            self._last_signal_time[data.condition_id] = now
 
         return signals
 

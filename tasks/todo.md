@@ -25,7 +25,7 @@
 - [x] `src/backtesting/harness.py` — Lightweight backtest harness with Sharpe ratio calculation
 - [x] `src/backtesting/data_loader.py` — Historical data fetcher from Polymarket API
 - [ ] Backtest each strategy on historical data, record PnL, Sharpe, max drawdown
-- [ ] Walk-forward validation for strategies with ML components
+- [x] Walk-forward validation for strategies with ML components
 - [x] Shadow trading mode — SHADOW_MODE flag connects to live data but paper-trades only
 
 ## Phase 4: Dashboard & Monitoring
@@ -46,7 +46,7 @@
 - [x] Security audit of dependency tree (pmxt removed, py-clob-client verified official)
 - [x] Remove pmxt dependency (flagged in security audit — unofficial, sidecar security risk)
 - [x] Key rotation documentation (docs/key_rotation.md)
-- [ ] Rate limiting and retry logic on all external API calls
+- [x] Rate limiting and retry logic on all external API calls (tenacity @retry + 30s timeout)
 
 ## Review
 - Phase 1 complete. Phase 2 complete (6 strategies). Phase 3 core done (harness + data loader).

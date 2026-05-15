@@ -1,0 +1,15 @@
+.env
+.env.*
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+node_modules/
+.git/
+.claude/
+data/
+*.parquet
+*.csv
+*.key
+*.pem

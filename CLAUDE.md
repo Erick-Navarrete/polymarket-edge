@@ -55,7 +55,55 @@ These are vetted open-source repos that inform our architecture:
 - **Audit all dependencies** — legit repos can be compromised via dependency chain attacks
 - **Do NOT use pmxt** — unofficial package requiring insecure Node.js sidecar; removed for security (see docs/security_audit.md)
 
-## Project Structure (Planned)
+## Project Status (Updated 2026-05-14)
+
+**All 5 phases complete.** 36 tests passing. Shadow mode verified.
+
+### Completed This Session
+- Market making signal cooldown added (5s per market, configurable via `BandsConfig.signal_cooldown_seconds`)
+- 5.5-minute shadow run: 2364 data points, 521 signals (market_making: 496, crypto_15m: 25)
+- React frontend + FastAPI backend verified end-to-end (dev proxy + production SPA serving)
+- Docker deployment: `Dockerfile`, updated `docker-compose.yml` (app + infra), `.dockerignore`
+- Render deployment: `render.yaml` with auto-discovered DB/Redis + secret env vars
+- Todo checkboxes updated (walk-forward + rate limiting marked done)
+
+### Quick Commands
+```bash
+cd C:\Users\Navar\Projects\polymarket-edge
+python -m pytest tests/ -v                    # Run 36 tests
+python scripts/run_backtest.py                # Synthetic backtest
+python scripts/run_live_backtest.py            # Live data backtest (Gamma API)
+python scripts/run_backtest.py --walk-forward  # Walk-forward validation
+python scripts/shadow_run.py --duration 300 --top-markets 10  # Shadow mode
+uvicorn src.dashboard.app:app --port 8000     # Backend only
+cd src/dashboard/frontend && npm run dev      # Frontend dev (proxies to :8000)
+docker-compose up --build                     # Full stack (needs Docker)
+```
+
+### Remaining Work (Prioritized)
+1. **CLOB API auth for real OHLCV** — need `POLYMARKET_API_KEY` in `.env`; enables true timeseries backtesting
+2. **Longer shadow runs** — try 30min+ to see weather/arbitrage strategies firing naturally
+3. **Docker deployment test** — build & run on a Docker-enabled host to verify `docker-compose up`
+4. **Render deploy** — push to GitHub, connect to Render, set secret env vars in dashboard
+5. **Strategy-specific improvements:**
+   - `copy_trading`: 0% win rate on synthetic data — needs real wallet targets or better simulation
+   - `arbitrage`: 0.00 Sharpe on synthetic — needs real cross-platform price data
+   - `market_making`: Cooldown working at 5s; tune to 10-15s for production if signal volume still too high
+
+### Deployment Notes
+- **Docker**: `docker-compose up --build` starts app (:8000) + Postgres + Redis + Grafana (:3001) + Prometheus (:9090)
+- **Render**: Connect GitHub repo, set env vars in Render dashboard, `render.yaml` auto-provisions DB + Redis
+- **Frontend**: Built to `src/dashboard/frontend/dist/` — FastAPI serves it in production via SPA catch-all
+- **No Docker locally**: This dev machine doesn't have Docker; test deployment on a cloud host
+
+### Resuming Steps
+When picking up this project:
+1. `python -m pytest tests/ -v` — verify all green
+2. Check `tasks/todo.md` for remaining unchecked items
+3. Check `tasks/lessons.md` for past corrections
+4. If working on strategies: each lives in `src/strategies/<name>/`
+5. If working on dashboard: `uvicorn` backend + `npm run dev` frontend
+6. If deploying: Dockerfile + docker-compose.yml ready; render.yaml for PaaS
 
 ```
 polymarket-edge/

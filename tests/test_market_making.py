@@ -19,6 +19,7 @@ def config():
         spread_bps=200,  # 2% spread
         order_size=Decimal("10"),
         max_position=Decimal("100"),
+        signal_cooldown_seconds=0,  # No cooldown in tests
     )
 
 
@@ -96,6 +97,27 @@ async def test_inventory_skew(strategy, market_data):
     # With long inventory, we should still have signals
     # but the skew should be reflected in the prices
     assert len(signals) >= 1
+
+
+@pytest.mark.asyncio
+async def test_signal_cooldown_enforced(settings):
+    """Rapid on_data calls should be throttled by cooldown."""
+    config = BandsConfig(spread_bps=200, signal_cooldown_seconds=10.0)
+    s = MarketMakingStrategy(settings, config)
+    await s.start()
+    data = MarketData(
+        condition_id="0xcool",
+        question="Test?",
+        yes_price=Decimal("0.50"),
+        no_price=Decimal("0.50"),
+        spread=Decimal("0.02"),
+        volume_24h=Decimal("1000"),
+        timestamp=1000.0,
+    )
+    signals1 = await s.on_data(data)
+    assert len(signals1) == 2  # First call produces signals
+    signals2 = await s.on_data(data)
+    assert len(signals2) == 0  # Second call blocked by cooldown
 
 
 @pytest.mark.asyncio
