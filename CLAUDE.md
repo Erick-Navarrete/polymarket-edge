@@ -55,40 +55,48 @@ These are vetted open-source repos that inform our architecture:
 - **Audit all dependencies** — legit repos can be compromised via dependency chain attacks
 - **Do NOT use pmxt** — unofficial package requiring insecure Node.js sidecar; removed for security (see docs/security_audit.md)
 
-## Project Status (Updated 2026-05-14)
+## Project Status (Updated 2026-05-15)
 
-**All 5 phases complete.** 36 tests passing. Shadow mode verified.
+**All 5 phases complete.** 44 tests passing. Shadow mode verified (4/6 strategies firing).
 
-### Completed This Session
-- Market making signal cooldown added (5s per market, configurable via `BandsConfig.signal_cooldown_seconds`)
-- 5.5-minute shadow run: 2364 data points, 521 signals (market_making: 496, crypto_15m: 25)
-- React frontend + FastAPI backend verified end-to-end (dev proxy + production SPA serving)
-- Docker deployment: `Dockerfile`, updated `docker-compose.yml` (app + infra), `.dockerignore`
-- Render deployment: `render.yaml` with auto-discovered DB/Redis + secret env vars
+### Completed (Session 1 -- 2026-05-14)
+- Market making signal cooldown (15s per market, configurable)
+- 30-min shadow run: 40,775 data points, 8,106 signals (stable, no crashes)
+- React frontend + FastAPI backend verified end-to-end
+- Docker deployment: `Dockerfile`, `docker-compose.yml`, `.dockerignore`
+- Render deployment: `render.yaml`
 - Todo checkboxes updated (walk-forward + rate limiting marked done)
+
+### Completed (Session 2 -- 2026-05-15)
+- **copy_trading**: Added momentum-following logic (was dead stub returning empty signals)
+- **arbitrage**: Added mean-reversion arb for extreme prices (>=0.95, <=0.05) and large price swings
+- **Cooldowns**: arbitrage (60s), copy_trading (30s), market_making (15s)
+- **8 new tests**: arbitrage mean-reversion, cooldown, copy_trading momentum, target qualification
+- **Shadow mode**: 4/6 strategies now fire live (arb: 59, copy: 38, mm: 576, crypto: 104)
+- **Pushed to GitHub**: 2 commits pushed to origin/main
 
 ### Quick Commands
 ```bash
 cd C:\Users\Navar\Projects\polymarket-edge
-python -m pytest tests/ -v                    # Run 36 tests
+python -m pytest tests/ -v                    # Run 44 tests
 python scripts/run_backtest.py                # Synthetic backtest
 python scripts/run_live_backtest.py            # Live data backtest (Gamma API)
 python scripts/run_backtest.py --walk-forward  # Walk-forward validation
-python scripts/shadow_run.py --duration 300 --top-markets 10  # Shadow mode
+python scripts/shadow_run.py --duration 300 --top-markets 20  # Shadow mode
 uvicorn src.dashboard.app:app --port 8000     # Backend only
 cd src/dashboard/frontend && npm run dev      # Frontend dev (proxies to :8000)
 docker-compose up --build                     # Full stack (needs Docker)
 ```
 
 ### Remaining Work (Prioritized)
-1. **CLOB API auth for real OHLCV** — need `POLYMARKET_API_KEY` in `.env`; enables true timeseries backtesting
-2. **Longer shadow runs** — try 30min+ to see weather/arbitrage strategies firing naturally
-3. **Docker deployment test** — build & run on a Docker-enabled host to verify `docker-compose up`
-4. **Render deploy** — push to GitHub, connect to Render, set secret env vars in dashboard
-5. **Strategy-specific improvements:**
-   - `copy_trading`: 0% win rate on synthetic data — needs real wallet targets or better simulation
-   - `arbitrage`: 0.00 Sharpe on synthetic — needs real cross-platform price data
-   - `market_making`: Cooldown working at 5s; tune to 10-15s for production if signal volume still too high
+1. **CLOB API auth for real OHLCV** -- need `POLYMARKET_API_KEY` in `.env`; enables true timeseries backtesting
+2. **Weather strategy in shadow mode** -- currently 0 signals; needs weather-type markets or broader selection
+3. **AI agent** -- needs `OPENAI_API_KEY` to fire; currently warns and skips
+4. **Docker deployment test** -- build and run on a Docker-enabled host
+5. **Render deploy** -- connect GitHub repo to Render, set secret env vars in dashboard
+6. **Strategy tuning with real data:**
+   - copy_trading momentum: verify on real trending markets (crypto events)
+   - arbitrage mean-reversion: check if PM extreme prices actually revert
 
 ### Deployment Notes
 - **Docker**: `docker-compose up --build` starts app (:8000) + Postgres + Redis + Grafana (:3001) + Prometheus (:9090)
