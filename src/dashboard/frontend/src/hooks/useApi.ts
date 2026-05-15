@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { StrategyInfo, PositionInfo, RiskStatus, SystemStatus } from '../types'
+import type { StrategyInfo, PositionInfo, RiskStatus, SystemStatus, SignalEntry, FillEntry, EquityPoint } from '../types'
 
 async function api<T>(path: string): Promise<T> {
   const res = await fetch(path)
@@ -55,6 +55,51 @@ export function useRisk() {
     return () => clearInterval(id)
   }, [])
   return risk
+}
+
+export function useSignals() {
+  const [signals, setSignals] = useState<SignalEntry[]>([])
+  useEffect(() => {
+    api<{ signals: SignalEntry[] }>('/api/signals')
+      .then((d) => setSignals(d.signals))
+      .catch(() => setSignals([]))
+    const id = setInterval(
+      () => api<{ signals: SignalEntry[] }>('/api/signals').then((d) => setSignals(d.signals)),
+      5000,
+    )
+    return () => clearInterval(id)
+  }, [])
+  return signals
+}
+
+export function useFills() {
+  const [fills, setFills] = useState<FillEntry[]>([])
+  useEffect(() => {
+    api<{ fills: FillEntry[] }>('/api/fills')
+      .then((d) => setFills(d.fills))
+      .catch(() => setFills([]))
+    const id = setInterval(
+      () => api<{ fills: FillEntry[] }>('/api/fills').then((d) => setFills(d.fills)),
+      5000,
+    )
+    return () => clearInterval(id)
+  }, [])
+  return fills
+}
+
+export function useEquityHistory() {
+  const [history, setHistory] = useState<EquityPoint[]>([])
+  useEffect(() => {
+    api<{ history: EquityPoint[] }>('/api/equity-history')
+      .then((d) => setHistory(d.history))
+      .catch(() => setHistory([]))
+    const id = setInterval(
+      () => api<{ history: EquityPoint[] }>('/api/equity-history').then((d) => setHistory(d.history)),
+      10000,
+    )
+    return () => clearInterval(id)
+  }, [])
+  return history
 }
 
 export async function toggleStrategy(name: string, action: 'start' | 'stop') {

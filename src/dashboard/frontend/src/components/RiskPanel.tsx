@@ -9,16 +9,18 @@ function GaugeBar({ label, value, max, unit }: { label: string; value: number; m
   const color = pct > 80 ? 'bg-red-500' : pct > 50 ? 'bg-amber-500' : 'bg-emerald-500'
 
   return (
-    <div className="space-y-1">
+    <div className="space-y-1.5">
       <div className="flex items-center justify-between text-xs">
         <span className="text-white/40">{label}</span>
         <span className="font-mono text-white/70">
-          {value.toFixed(1)}
-          {unit}
+          {value.toFixed(1)}{unit}
         </span>
       </div>
-      <div className="h-1.5 rounded-full bg-white/10">
-        <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
+      <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
+        <div
+          className={`h-full rounded-full transition-all duration-500 ${color}`}
+          style={{ width: `${pct}%` }}
+        />
       </div>
     </div>
   )
@@ -49,7 +51,7 @@ export default function RiskPanel({ risk }: Props) {
 
       <div className="space-y-3">
         <GaugeBar label="Drawdown" value={drawdown} max={40} unit="%" />
-        <GaugeBar label="Exposure / Equity" value={equity > 0 ? (exposure / equity) * 100 : 0} max={100} unit="%" />
+        <GaugeBar label="Utilization" value={equity > 0 ? (exposure / equity) * 100 : 0} max={100} unit="%" />
       </div>
 
       <div className="grid grid-cols-2 gap-3 text-xs">
@@ -72,6 +74,17 @@ export default function RiskPanel({ risk }: Props) {
         <div>
           <span className="text-white/40">Total Exposure</span>
           <div className="font-mono text-white">${risk.total_exposure}</div>
+        </div>
+      </div>
+
+      <div className="border-t border-white/5 pt-3">
+        <h3 className="mb-2 text-xs font-medium text-white/50">Limits</h3>
+        <div className="space-y-1 text-[11px] text-white/40">
+          <div className="flex justify-between"><span>Daily Loss</span><span className="font-mono">5%</span></div>
+          <div className="flex justify-between"><span>Monthly Loss</span><span className="font-mono">15%</span></div>
+          <div className="flex justify-between"><span>Drawdown</span><span className="font-mono">25%</span></div>
+          <div className="flex justify-between"><span>Max Position</span><span className="font-mono">$500</span></div>
+          <div className="flex justify-between"><span>Max Exposure</span><span className="font-mono">$5,000</span></div>
         </div>
       </div>
     </div>

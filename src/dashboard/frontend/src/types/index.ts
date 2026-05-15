@@ -10,6 +10,8 @@ export interface StrategyInfo {
   total_pnl: string
   total_exposure: string
   positions: number
+  description: string
+  icon: string
 }
 
 export interface PositionInfo {
@@ -32,7 +34,45 @@ export interface RiskStatus {
   drawdown_pct: string
 }
 
+export interface SignalEntry {
+  time: number
+  strategy: string
+  condition_id: string
+  side: string
+  price: string
+  size: string
+  reason: string
+  confidence: number
+}
+
+export interface FillEntry {
+  time: number
+  strategy: string
+  side: string
+  price: string
+  fill_price: string
+  size: string
+  pnl: string
+}
+
+export interface EquityPoint {
+  time: number
+  equity: string
+}
+
 export interface WsPayload {
   risk: RiskStatus
-  strategies: Record<string, { state: string; pnl: string; exposure: string }>
+  strategies: Record<string, StrategyWsData>
+  recent_signals: SignalEntry[]
+  recent_fills: FillEntry[]
+  equity_history: EquityPoint[]
+}
+
+export interface StrategyWsData {
+  state: string
+  pnl: string
+  exposure: string
+  positions: number
+  description: string
+  icon: string
 }

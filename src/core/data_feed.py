@@ -66,7 +66,7 @@ class DataFeed:
                 while needed and offset < 1000:
                     resp = await client.get(
                         "/markets",
-                        params={"limit": batch_size, "offset": offset, "closed": False},
+                        params={"limit": batch_size, "offset": offset, "closed": False, "order": "volume", "ascending": False},
                     )
                     if resp.status_code != 200:
                         break
@@ -78,7 +78,7 @@ class DataFeed:
                         raw = m.get("clobTokenIds", "[]")
                         ids = json.loads(raw) if isinstance(raw, str) else raw
                         question = m.get("question", "")
-                        condition_id = m.get("condition_id", "")
+                        condition_id = m.get("conditionId", "")
 
                         for tid in ids:
                             if tid in needed:
@@ -95,6 +95,15 @@ class DataFeed:
 
         except Exception as e:
             logger.warning("metadata_prefetch_failed", error=str(e))
+
+    
+
+    def set_metadata(self, token_id: str, question: str, condition_id: str) -> None:
+        """Directly set metadata for a token (avoid re-fetching from Gamma API)."""
+        self._token_metadata[token_id] = {
+            "question": question,
+            "condition_id": condition_id,
+        }
 
     def _enrich_from_metadata(self, asset_id: str) -> dict:
         """Get metadata for a token_id from the prefetched cache."""

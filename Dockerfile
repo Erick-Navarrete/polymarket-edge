@@ -38,7 +38,7 @@ COPY --from=builder /app/src/dashboard/frontend/dist /app/src/dashboard/frontend
 
 # Health check
 HEALTHCHECK --interval=10s --timeout=5s --retries=3 --start-period=15s \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/')" || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')" || exit 1
 
 EXPOSE 8000
 

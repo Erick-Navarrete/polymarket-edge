@@ -4,11 +4,11 @@ Connects to the live WebSocket feed, feeds real-time market data to all strategi
 but executes only paper trades. Reports all generated signals and paper P&L.
 
 Usage:
-    python scripts/shadow_run.py                         # Run for 5 minutes
-    python scripts/shadow_run.py --duration 300          # Run for 5 minutes (seconds)
-    python scripts/shadow_run.py --strategy weather       # Only weather strategy
-    python scripts/shadow_run.py --top-markets 10         # Subscribe to top 10 markets
-    python scripts/shadow_run.py --include-weather        # Also discover weather markets
+    python scripts/shadow_run.py                     # Run for 5 minutes
+    python scripts/shadow_run.py --duration 300      # Run for 5 minutes (seconds)
+    python scripts/shadow_run.py --strategy weather   # Only weather strategy
+    python scripts/shadow_run.py --top-markets 10    # Subscribe to top 10 markets
+    python scripts/shadow_run.py --include-weather   # Also discover weather markets
 
 No live trading — SHADOW_MODE=true always. All trades are paper.
 """
@@ -37,9 +37,14 @@ logger = structlog.get_logger()
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 
+WEATHER_KEYWORDS = ("temperature", "temp", "rain", "snow", "precipitation", "fahrenheit", "weather")
 
-async def discover_active_tokens(top_n: int = 10) -> list[str]:
-    """Fetch top active market token IDs from Gamma API."""
+
+async def discover_active_tokens(top_n: int = 10) -> tuple[list[str], list[dict]]:
+    """Fetch top active market token IDs and raw market data from Gamma API.
+
+    Returns (token_ids, markets) so callers can extract metadata without re-fetching.
+    """
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.get(
             f"{GAMMA_API}/markets",
@@ -55,15 +60,15 @@ async def discover_active_tokens(top_n: int = 10) -> list[str]:
             if ids:
                 token_ids.append(ids[0])  # YES token
 
-        return token_ids
+        return token_ids, markets
 
 
 async def discover_weather_tokens(n: int = 5) -> list[tuple[str, str, str]]:
     """Discover weather market tokens from the Gamma /events endpoint.
 
     Returns list of (token_id, question, condition_id) tuples for weather markets.
-    Uses event-level tags and series fields since /markets doesn't
-    support category filtering.
+    Only includes markets whose question text contains weather-related keywords
+    (temperature, rain, snow, etc.) to exclude mis-tagged events like pandemics.
     """
     weather_tokens: list[tuple[str, str, str]] = []
     async with httpx.AsyncClient(timeout=60) as client:
@@ -95,9 +100,19 @@ async def discover_weather_tokens(n: int = 5) -> list[tuple[str, str, str]]:
                 raw = market.get("clobTokenIds", "[]")
                 ids = json.loads(raw) if isinstance(raw, str) else raw
                 question = market.get("question", "")
-                condition_id = market.get("condition_id", "")
+                condition_id = market.get("conditionId", "")
+
+                # Only include markets that look like actual weather questions
+                q_lower = question.lower()
+                is_weather_question = any(kw in q_lower for kw in WEATHER_KEYWORDS)
+                if not is_weather_question:
+                    continue
+
                 if ids:
                     weather_tokens.append((ids[0], question, condition_id))
+
+                if len(weather_tokens) >= n:
+                    break
 
             if len(weather_tokens) >= n:
                 break
@@ -131,7 +146,6 @@ def make_forecast_from_question(question: str) -> WeatherForecast | None:
         return None
 
     # Determine location from question (simplified: default to NYC baseline)
-    # NYC May average high: ~72F, std dev ~8F
     avg_high = Decimal("72")
     std_dev = Decimal("8")
 
@@ -149,14 +163,13 @@ def make_forecast_from_question(question: str) -> WeatherForecast | None:
     diff = avg_high - threshold
     z_score = diff / std_dev
 
-    # Rough probability estimate from normal CDF approximation
     if z_score > Decimal("3"):
         est_prob = Decimal("0.99")
     elif z_score < Decimal("-3"):
         est_prob = Decimal("0.01")
     else:
         est_prob = Decimal("0.5") + z_score * Decimal("0.2")
-        est_prob = max(Decimal("0.01"), min(Decimal("0.99"), est_prob))
+    est_prob = max(Decimal("0.01"), min(Decimal("0.99"), est_prob))
 
     return WeatherForecast(
         location="auto-detected",
@@ -242,7 +255,7 @@ async def shadow_run(
 
     # Discover market tokens
     print(f"Discovering top {top_markets} active markets...")
-    token_ids = await discover_active_tokens(top_markets)
+    token_ids, raw_markets = await discover_active_tokens(top_markets)
     print(f"Found {len(token_ids)} tokens to monitor")
 
     # Discover weather tokens if requested
@@ -252,7 +265,6 @@ async def shadow_run(
         weather_tokens = await discover_weather_tokens(5)
         print(f"Found {len(weather_tokens)} weather tokens")
         weather_token_ids = [t[0] for t in weather_tokens]
-        # Add weather tokens that aren't already in the list
         for tid in weather_token_ids:
             if tid not in token_ids:
                 token_ids.append(tid)
@@ -285,25 +297,31 @@ async def shadow_run(
     if include_weather and weather_tokens:
         weather_strat = engine._strategies.get("weather")
         if weather_strat:
- for token_id, question, condition_id in weather_tokens:
- forecast = make_forecast_from_question(question)
- if forecast:
- # Key by condition_id (matches MarketData.condition_id from WS)
- key = condition_id or token_id
- weather_strat.update_forecast(key, forecast)
- # Also key by token_id as fallback in case condition_id comes as asset_id
- if condition_id and condition_id != token_id:
- weather_strat.update_forecast(token_id, forecast)
- print(f"  Weather forecast set: {question[:60]}...")
+            for token_id, question, condition_id in weather_tokens:
+                forecast = make_forecast_from_question(question)
+                if forecast:
+                    key = condition_id or token_id
+                    weather_strat.update_forecast(key, forecast)
+                    if condition_id and condition_id != token_id:
+                        weather_strat.update_forecast(token_id, forecast)
+                    print(f"  Weather forecast set: {question[:60]}...")
 
- # Pre-fetch market metadata so WebSocket data includes question text
- print("Pre-fetching market metadata from Gamma API...")
- await data_feed.prefetch_metadata(token_ids)
- print(f"Metadata cached for {len(data_feed._token_metadata)} tokens")
+    # Set market metadata from the markets we already fetched (no extra API call)
+    for m in raw_markets:
+        raw_clob = m.get("clobTokenIds", "[]")
+        clob_ids = json.loads(raw_clob) if isinstance(raw_clob, str) else raw_clob
+        question = m.get("question", "")
+        condition_id = m.get("conditionId", "")
+        for tid in clob_ids:
+            data_feed.set_metadata(tid, question, condition_id)
+
+    # Also prefetch for weather tokens not in raw_markets
+    weather_only_ids = [t[0] for t in weather_tokens if t[0] not in token_ids]
+    if weather_only_ids:
+        await data_feed.prefetch_metadata(weather_only_ids)
+    print(f"Metadata cached for {len(data_feed._token_metadata)} tokens")
 
     # Monkey-patch engine to collect signals
-    original_process = engine._process_market_data
-
     async def collecting_process(data: MarketData) -> None:
         collector.data_points += 1
         for strategy in engine._strategies.values():

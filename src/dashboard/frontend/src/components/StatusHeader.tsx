@@ -8,15 +8,16 @@ interface Props {
 
 export default function StatusHeader({ status, risk, wsConnected }: Props) {
   const mode = status?.mode ?? '——'
-  const modeBg = mode === 'LIVE' ? 'bg-red-500/20 text-red-400'
-    : mode === 'SHADOW' ? 'bg-amber-500/20 text-amber-400'
-    : 'bg-emerald-500/20 text-emerald-400'
+  const modeBg =
+    mode === 'LIVE' ? 'bg-red-500/20 text-red-400' :
+    mode === 'SHADOW' ? 'bg-amber-500/20 text-amber-400' :
+    'bg-emerald-500/20 text-emerald-400'
 
   return (
     <header className="flex items-center justify-between border-b border-white/10 px-6 py-4">
       <div className="flex items-center gap-4">
         <h1 className="text-xl font-bold tracking-tight text-white">Polymarket Edge</h1>
-        <span className={`rounded px-2 py-0.5 text-xs font-semibold ${modeBg}`}>
+        <span className={`rounded-md px-2.5 py-1 text-xs font-bold ${modeBg}`}>
           {mode}
         </span>
       </div>
@@ -31,9 +32,7 @@ export default function StatusHeader({ status, risk, wsConnected }: Props) {
             <div>
               <span className="text-white/40">Daily PnL</span>{' '}
               <span
-                className={`font-mono ${
-                  Number(risk.daily_pnl) >= 0 ? 'text-emerald-400' : 'text-red-400'
-                }`}
+                className={`font-mono ${Number(risk.daily_pnl) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}
               >
                 ${risk.daily_pnl}
               </span>
@@ -52,10 +51,8 @@ export default function StatusHeader({ status, risk, wsConnected }: Props) {
         )}
 
         <div className="flex items-center gap-1.5">
-          <span
-            className={`h-2 w-2 rounded-full ${wsConnected ? 'bg-emerald-400' : 'bg-red-400'}`}
-          />
-          <span className="text-white/40">{wsConnected ? 'Live' : 'Disconnected'}</span>
+          <span className={`h-2 w-2 rounded-full ${wsConnected ? 'bg-emerald-400' : 'bg-red-400'}`} />
+          <span className="text-white/40">{wsConnected ? 'Live' : 'Offline'}</span>
         </div>
       </div>
     </header>
