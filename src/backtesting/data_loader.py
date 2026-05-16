@@ -31,45 +31,72 @@ class HistoricalDataLoader:
         self._clob_client = None
 
     async def _ensure_clob_client(self):
-        """Lazily initialize py-clob-client for authenticated CLOB requests."""
+        """Lazily initialize py-clob-client for authenticated CLOB requests.
+
+        Three auth levels:
+        1. Full L2 credentials (key+secret+passphrase) — best, all endpoints available
+        2. L1 wallet key — can derive L2 credentials via create_or_derive_api_creds
+        3. No auth — falls back to Gamma public endpoints for pseudo-timeseries
+        """
         if self._clob_client is not None:
             return self._clob_client is not False
 
-        if not all([
+        try:
+            from py_clob_client.client import ClobClient
+            from py_clob_client.clob_types import ApiCreds
+        except ImportError:
+            logger.warning("data_loader_no_py_clob_client", msg="Install py-clob-client for authenticated OHLCV")
+            self._clob_client = False
+            return False
+
+        # Try full L2 credentials first
+        if all([
             self.settings.polymarket_api_key,
             self.settings.polymarket_api_secret,
             self.settings.polymarket_api_passphrase,
         ]):
-            logger.info("data_loader_no_clob_auth", msg="CLOB API key not configured — OHLCV requires authenticated access")
-            self._clob_client = False
-            return False
-
-        try:
-            from py_clob_client.client import ClobClient
-
-            self._clob_client = ClobClient(
-                self.settings.clob_api_url,
-                key=self.settings.polymarket_api_key,
-                chain_id=137,
-                timeout=30,
-            )
-            # Derive L2 API key for authenticated read access
-            creds = {
-                "api_key": self.settings.polymarket_api_key,
-                "api_secret": self.settings.polymarket_api_secret,
-                "api_passphrase": self.settings.polymarket_api_passphrase,
-            }
             try:
-                self._clob_client.get_api_keys(creds)
-            except Exception:
-                logger.warning("data_loader_clob_auth_check_failed", msg="CLOB API key derivation may be incomplete — will attempt requests anyway")
+                creds = ApiCreds(
+                    api_key=self.settings.polymarket_api_key,
+                    api_secret=self.settings.polymarket_api_secret,
+                    api_passphrase=self.settings.polymarket_api_passphrase,
+                )
+                self._clob_client = ClobClient(
+                    self.settings.clob_api_url,
+                    chain_id=137,
+                    creds=creds,
+                    timeout=30,
+                )
+                logger.info("data_loader_clob_l2_authenticated")
+                return True
+            except Exception as e:
+                logger.warning("data_loader_clob_l2_init_failed", error=str(e))
 
-            logger.info("data_loader_clob_authenticated")
-            return True
-        except Exception as e:
-            logger.warning("data_loader_clob_init_failed", error=str(e))
+        # Try L1 wallet key to derive L2 credentials
+        if self.settings.polymarket_api_key and self.settings.polygon_wallet_private_key:
+            try:
+                self._clob_client = ClobClient(
+                    self.settings.clob_api_url,
+                    chain_id=137,
+                    key=self.settings.polygon_wallet_private_key,
+                    timeout=30,
+                )
+                derived_creds = self._clob_client.create_or_derive_api_creds()
+                self._clob_client.set_api_creds(derived_creds)
+                logger.info("data_loader_clob_l1_derived", api_key=derived_creds.api_key[:12])
+                return True
+            except Exception as e:
+                logger.warning("data_loader_clob_l1_derive_failed", error=str(e))
+
+        # L2 key only — limited access, try public-ish endpoints
+        if self.settings.polymarket_api_key:
+            logger.info("data_loader_clob_partial_auth", msg="L2 key present but no secret/passphrase — limited to public endpoints + Gamma fallback")
             self._clob_client = False
             return False
+
+        logger.info("data_loader_no_clob_auth", msg="No CLOB API credentials — falling back to Gamma public endpoints")
+        self._clob_client = False
+        return False
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
     async def fetch_market_history(
@@ -120,7 +147,13 @@ class HistoricalDataLoader:
                 logger.warning("data_loader_clob_prices_failed", error=str(e), msg="Falling back to Gamma trades")
 
         # Fallback: build pseudo-timeseries from Gamma trade history
-        return await self._fetch_pseudo_timeseries(token_id, interval, limit)
+        # Also try CLOB trades endpoint (may work without full auth for some markets)
+        pseudo = await self._fetch_pseudo_timeseries(token_id, interval, limit)
+        if pseudo:
+            return pseudo
+
+        # Last resort: try CLOB market trades by condition_id
+        return await self._fetch_clob_trades(token_id, interval, limit)
 
     async def _fetch_pseudo_timeseries(
         self,
@@ -209,3 +242,79 @@ class HistoricalDataLoader:
 
     async def close(self) -> None:
         await self._http.aclose()
+
+    async def _fetch_clob_trades(
+        self,
+        token_id: str,
+        interval: str = "1h",
+        limit: int = 1000,
+    ) -> list[dict]:
+        """Try fetching trades from CLOB /markets endpoint by condition_id.
+
+        This uses public CLOB endpoints that don't require authentication.
+        """
+        try:
+            # Look up condition_id from markets data
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    f"{self.settings.clob_api_url}/markets",
+                    params={"next_cursor": "MA=="},
+                )
+                if resp.status_code != 200:
+                    return []
+
+                markets_data = resp.json().get("data", [])
+                condition_id = ""
+                for m in markets_data:
+                    for token in m.get("tokens", []):
+                        if token.get("token_id") == token_id:
+                            condition_id = m.get("condition_id", "")
+                            break
+                    if condition_id:
+                        break
+
+                if not condition_id:
+                    return []
+
+                # Try CLOB trades endpoint
+                resp2 = await client.get(
+                    f"{self.settings.clob_api_url}/market-trades-events",
+                    params={"condition_id": condition_id},
+                )
+                if resp2.status_code != 200:
+                    return []
+
+                trades = resp2.json().get("trades", resp2.json()) if isinstance(resp2.json(), dict) else resp2.json()
+                if not trades:
+                    return []
+
+                # Aggregate into OHLCV buckets
+                interval_sec = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}.get(interval, 3600)
+                buckets: dict[int, list[Decimal]] = {}
+
+                for t in trades:
+                    ts = int(float(t.get("timestamp", 0)))
+                    bucket_ts = (ts // interval_sec) * interval_sec
+                    price = Decimal(str(t.get("price", "0")))
+                    if price > 0:
+                        buckets.setdefault(bucket_ts, []).append(price)
+
+                result = []
+                for bts in sorted(buckets.keys())[:limit]:
+                    prices = buckets[bts]
+                    result.append({
+                        "t": bts,
+                        "o": str(prices[0]),
+                        "h": str(max(prices)),
+                        "l": str(min(prices)),
+                        "c": str(prices[-1]),
+                        "v": str(len(prices)),
+                        "source": "clob_public_trades",
+                    })
+
+                logger.info("data_loader_clob_trades", token_id=token_id[:16], buckets=len(result))
+                return result
+
+        except Exception as e:
+            logger.warning("data_loader_clob_trades_failed", error=str(e))
+            return []
