@@ -1,14 +1,17 @@
 """Weather market strategy -- NOAA forecast data vs Polymarket weather prices.
 
 When NOAA forecasts are available (via update_forecast), uses them directly.
-When running in shadow mode without explicit forecasts, auto-detects temperature
-markets from the question text and estimates probability using climatological
-baselines for known cities.
+Falls back to auto-detection: parses temperature/rain questions and estimates
+probability using climatological baselines for known cities, or fetches live
+NOAA data when the city has a known gridpoint.
 """
 
 import re
+import time
 import structlog
 from decimal import Decimal
+
+import httpx
 
 from src.core.config import Settings
 from src.core.strategy_base import MarketData, Strategy, TradeSignal
@@ -16,6 +19,20 @@ from src.core.strategy_base import MarketData, Strategy, TradeSignal
 logger = structlog.get_logger()
 
 NOAA_BASE_URL = "https://api.weather.gov"
+
+# NOAA gridpoints for major cities (office, gridX, gridY)
+CITY_GRIDPOINTS: dict[str, tuple[str, int, int]] = {
+    "nyc": ("OKX", 33, 37),
+    "new york": ("OKX", 33, 37),
+    "london": None,  # NOAA is US-only
+    "austin": ("EWX", 55, 55),
+    "houston": ("HGX", 51, 96),
+    "dallas": ("FWD", 79, 87),
+    "miami": ("MFL", 49, 70),
+    "seattle": ("SEW", 125, 67),
+    "chicago": ("LOT", 67, 73),
+    "denver": ("BOU", 61, 62),
+}
 
 # Climatological baselines: average May highs and standard deviations
 CITY_CLIMATES: dict[str, tuple[Decimal, Decimal]] = {
@@ -91,6 +108,8 @@ class WeatherStrategy(Strategy):
         self._auto_detected: set[str] = set()  # Markets where we auto-detected
         self._last_signal_time: dict[str, float] = {}
         self._signal_cooldown: float = 300.0  # 5 min between signals per weather market
+        self._noaa_cache: dict[str, tuple[float, WeatherForecast]] = {}  # city -> (ts, forecast)
+        self._noaa_cache_ttl: float = 1800.0  # 30 min cache
 
     async def start(self) -> None:
         await super().start()
@@ -172,10 +191,66 @@ class WeatherStrategy(Strategy):
         """Update the NOAA forecast for a market."""
         self._forecasts[condition_id] = forecast
 
+    async def _fetch_noaa_forecast(self, city_key: str) -> WeatherForecast | None:
+        """Fetch live NOAA forecast for a city. Returns None if city has no gridpoint."""
+        gridpoint = CITY_GRIDPOINTS.get(city_key)
+        if gridpoint is None:
+            return None
+
+        # Check cache
+        now = time.time()
+        cached = self._noaa_cache.get(city_key)
+        if cached and (now - cached[0]) < self._noaa_cache_ttl:
+            return cached[1]
+
+        office, gx, gy = gridpoint
+        url = f"{NOAA_BASE_URL}/gridpoints/{office}/{gx},{gy}/forecast"
+
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(url, headers={"User-Agent": "PolymarketEdge/1.0"})
+                if resp.status_code != 200:
+                    logger.warning("noaa_fetch_failed", city=city_key, status=resp.status_code)
+                    return None
+
+                data = resp.json()
+                periods = data.get("properties", {}).get("periods", [])
+                # Get today's daytime forecast
+                for period in periods:
+                    if period.get("isDaytime") and "Today" in period.get("name", ""):
+                        temp_f = Decimal(str(period.get("temperature", 0)))
+                        short = period.get("shortForecast", "").lower()
+                        precip_prob = None
+                        if "rain" in short or "shower" in short:
+                            precip_prob = Decimal("0.70")
+                        elif "drizzle" in short:
+                            precip_prob = Decimal("0.40")
+                        elif "cloudy" in short:
+                            precip_prob = Decimal("0.30")
+                        elif "sun" in short or "clear" in short:
+                            precip_prob = Decimal("0.05")
+
+                        forecast = WeatherForecast(
+                            location=city_key,
+                            high_temp_f=temp_f,
+                            precipitation_prob=precip_prob,
+                            source="NOAA_live",
+                        )
+                        self._noaa_cache[city_key] = (now, forecast)
+                        logger.info("noaa_forecast_fetched", city=city_key, high_f=str(temp_f), precip=str(precip_prob))
+                        return forecast
+
+                logger.warning("noaa_no_today_period", city=city_key)
+                return None
+        except Exception as e:
+            logger.warning("noaa_fetch_error", city=city_key, error=str(e))
+            return None
+
     def _auto_detect_forecast(self, data: MarketData) -> None:
         """Try to create a forecast from the market question automatically.
 
-        Detects temperature and rain questions and creates climatological estimates.
+        Detects temperature and rain questions. Tries NOAA live data first,
+        then falls back to climatological estimates.
         """
         q = data.question.lower()
 
@@ -204,11 +279,23 @@ class WeatherStrategy(Strategy):
         if city_key is None:
             return
 
+        # Try NOAA live data first (async, but called from sync context — use cached)
+        cached_noaa = self._noaa_cache.get(city_key)
+        if cached_noaa and (time.time() - cached_noaa[0]) < self._noaa_cache_ttl:
+            self._forecasts[data.condition_id] = cached_noaa[1]
+            logger.info(
+                "weather_auto_noaa_cached",
+                condition_id=data.condition_id[:16],
+                question=data.question[:60],
+                city=city_key,
+            )
+            return
+
+        # Fallback to climatology baseline
         avg_high, std_dev = CITY_CLIMATES[city_key]
 
         precip_prob = None
         if is_rain:
-            # Rough climatology-based rain probability
             precip_prob = Decimal("0.30") if "london" in city_key else Decimal("0.20")
 
         self._forecasts[data.condition_id] = WeatherForecast(

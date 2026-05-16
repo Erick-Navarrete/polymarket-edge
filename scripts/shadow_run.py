@@ -89,12 +89,19 @@ async def discover_weather_tokens(n: int = 5) -> list[tuple[str, str, str]]:
                         is_weather = True
                         break
 
-            series = event.get("series", "") or event.get("seriesSlug", "")
-            if isinstance(series, str) and "weather" in series.lower():
-                is_weather = True
+        series = event.get("series", "") or event.get("seriesSlug", "")
+        if isinstance(series, list):
+            series = " ".join(str(s) for s in series if s)
+        if isinstance(series, str) and "weather" in series.lower():
+            is_weather = True
 
-            if not is_weather:
-                continue
+        # Also check event title for weather keywords
+        title = (event.get("title", "") or "").lower()
+        if any(kw in title for kw in WEATHER_KEYWORDS):
+            is_weather = True
+
+        if not is_weather:
+            continue
 
             for market in event.get("markets", []):
                 raw = market.get("clobTokenIds", "[]")
@@ -297,10 +304,34 @@ async def shadow_run(
     if include_weather and weather_tokens:
         weather_strat = engine._strategies.get("weather")
         if weather_strat:
+            # Fetch live NOAA forecasts for known cities
+            from src.strategies.weather import CITY_GRIDPOINTS
+            noaa_cities = set()
+            for _, question, _ in weather_tokens:
+                q = question.lower()
+                for city in CITY_GRIDPOINTS:
+                    if city in q:
+                        noaa_cities.add(city)
+            for city in noaa_cities:
+                noaa_fc = await weather_strat._fetch_noaa_forecast(city)
+                if noaa_fc:
+                    print(f"  NOAA forecast: {city} high={noaa_fc.high_temp_f}F precip={noaa_fc.precipitation_prob}")
+
             for token_id, question, condition_id in weather_tokens:
                 forecast = make_forecast_from_question(question)
                 if forecast:
                     key = condition_id or token_id
+                    # Prefer NOAA live data over climatology
+                    city_key = None
+                    q = question.lower()
+                    for city in CITY_GRIDPOINTS:
+                        if city in q:
+                            city_key = city
+                            break
+                    if city_key:
+                        cached = weather_strat._noaa_cache.get(city_key)
+                        if cached:
+                            forecast = cached[1]
                     weather_strat.update_forecast(key, forecast)
                     if condition_id and condition_id != token_id:
                         weather_strat.update_forecast(token_id, forecast)

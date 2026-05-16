@@ -92,12 +92,20 @@ class Executor:
             return ExecutionResult(signal, success=False, error=str(e))
 
     def _execute_paper(self, signal: TradeSignal) -> ExecutionResult:
-        """Simulate a fill in paper mode at the signal price."""
+        """Simulate a fill in paper mode with realistic slippage."""
+        import random
+        # Apply small random slippage (0-2 bps) to simulate real fills
+        slip_bps = Decimal(str(random.randint(0, 20))) / Decimal("10000")
+        if signal.side.startswith("BUY"):
+            fill_price = signal.price * (1 + slip_bps)
+        else:
+            fill_price = signal.price * (1 - slip_bps)
         fill_record = {
             "strategy": signal.strategy,
             "condition_id": signal.condition_id,
             "side": signal.side,
             "price": str(signal.price),
+            "fill_price": str(fill_price),
             "size": str(signal.size),
             "confidence": signal.confidence,
             "reason": signal.reason,
@@ -110,7 +118,7 @@ class Executor:
         return ExecutionResult(
             signal,
             success=True,
-            fill_price=signal.price,
+            fill_price=fill_price,
             fill_size=signal.size,
         )
 

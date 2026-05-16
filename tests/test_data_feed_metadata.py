@@ -238,3 +238,67 @@ async def test_ai_agent_heuristic_logs_properly():
     signals = await strategy.on_data(data_final)
     assert isinstance(signals, list)
     await strategy.stop()
+
+
+# --- NOAA Cache Tests ---
+
+@pytest.mark.asyncio
+async def test_weather_noaa_cache_prefered_over_climatology():
+    """Weather strategy should prefer NOAA cached data over climatology baseline."""
+    import time
+    settings = Settings()
+    strategy = WeatherStrategy(settings)
+    await strategy.start()
+
+    # Pre-populate NOAA cache for NYC
+    noaa_forecast = WeatherForecast(
+        location="nyc", high_temp_f=Decimal("82"), source="NOAA_live"
+    )
+    strategy._noaa_cache["nyc"] = (time.time(), noaa_forecast)
+
+    data = MarketData(
+        condition_id="0xnyc_noaa",
+        question="Will the highest temperature in NYC exceed 85F?",
+        yes_price=Decimal("0.70"),
+        no_price=Decimal("0.30"),
+        spread=Decimal("0.02"),
+        volume_24h=Decimal("5000"),
+        timestamp=1000.0,
+    )
+    signals = await strategy.on_data(data)
+    # Should use NOAA (82F) instead of climatology (72F)
+    assert "0xnyc_noaa" in strategy._forecasts
+    assert strategy._forecasts["0xnyc_noaa"].source == "NOAA_live"
+    assert strategy._forecasts["0xnyc_noaa"].high_temp_f == Decimal("82")
+    await strategy.stop()
+
+
+# --- Paper Slippage Tests ---
+
+@pytest.mark.asyncio
+async def test_paper_fill_has_slippage():
+    """Paper fills should include small slippage rather than zero PnL."""
+    from src.core.executor import Executor
+    from src.core.risk_manager import RiskManager
+    from src.core.strategy_base import TradeSignal
+
+    settings = Settings()
+    rm = RiskManager(settings)
+    executor = Executor(settings, rm)
+    await executor.initialize()
+
+    signal = TradeSignal(
+        condition_id="0xslip_test",
+        side="BUY_YES",
+        price=Decimal("0.55"),
+        size=Decimal("10"),
+        reason="test",
+        confidence=0.8,
+        strategy="test",
+    )
+    result = await executor.execute(signal, Decimal("1000"))
+    assert result.success
+    # Buy fills should be >= signal price (slippage pushes it up)
+    assert result.fill_price >= signal.price
+    # But not excessively far away
+    assert result.fill_price < signal.price * Decimal("1.003")
