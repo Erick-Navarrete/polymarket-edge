@@ -84,6 +84,8 @@ databases:
   - name: polymarket-db
     plan: starter
 
-  - type: redis
-    name: polymarket-redis
-    plan: starter
+  services:
+ - type: redis
+  name: polymarket-redis
+  plan: starter
+  maxmemoryPolicy: no-eviction
