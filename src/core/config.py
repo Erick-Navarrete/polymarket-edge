@@ -41,6 +41,7 @@ class Settings(BaseSettings):
 
     # === AI / LLM ===
     openai_api_key: str = ""
+    anthropic_api_key: str = ""
 
     # === Database ===
     postgres_host: str = "localhost"

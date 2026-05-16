@@ -1,8 +1,9 @@
 """AI/LLM agent strategy — news parsing + probability estimation -> Kelly-sized trades.
 
-When OPENAI_API_KEY is not set, falls back to a simple volume-price heuristic
-that estimates probability from market activity patterns. This allows the
-strategy to participate in shadow mode without an LLM.
+Supports both OpenAI and Anthropic (Claude) APIs. When no API key is set,
+falls back to a simple volume-price heuristic that estimates probability
+from market activity patterns. This allows the strategy to participate in
+shadow mode without an LLM.
 """
 
 import time
@@ -91,23 +92,37 @@ class AIAgentStrategy(Strategy):
         self._estimates: dict[str, ProbabilityEstimate] = {}
         self._last_signal_time: dict[str, float] = {}
         self._signal_cooldown: float = 120.0 # 2 min between signals per market
-        # Heuristic state (used when no OpenAI key)
+        # Heuristic state (used when no LLM key)
         self._price_history: dict[str, list[Decimal]] = {}
-        # Reusable OpenAI client (created lazily)
+        # Reusable clients (created lazily)
         self._openai_client: Any | None = None
+        self._anthropic_client: Any | None = None
+        self._llm_provider: str | None = None
 
     async def start(self) -> None:
         await super().start()
-        if not self.settings.openai_api_key:
-            logger.info("ai_agent_heuristic_mode", msg="No OPENAI_API_KEY — using volume-price heuristic fallback")
+        self._llm_provider = self._detect_llm_provider()
+        if self._llm_provider:
+            logger.info("ai_agent_started", provider=self._llm_provider)
         else:
-            logger.info("ai_agent_started")
+            logger.info("ai_agent_heuristic_mode", msg="No OPENAI_API_KEY or ANTHROPIC_API_KEY — using volume-price heuristic fallback")
+
+    def _detect_llm_provider(self) -> str | None:
+        """Detect which LLM provider is available."""
+        if self.settings.openai_api_key:
+            return "openai"
+        if getattr(self.settings, 'anthropic_api_key', ''):
+            return "anthropic"
+        return None
 
     async def stop(self) -> None:
         await super().stop()
         if self._openai_client is not None:
             await self._openai_client.close()
             self._openai_client = None
+        if self._anthropic_client is not None:
+            await self._anthropic_client.close()
+            self._anthropic_client = None
 
     async def on_data(self, data: MarketData) -> list[TradeSignal]:
         if self.state.value != "running":
@@ -121,7 +136,7 @@ class AIAgentStrategy(Strategy):
 
         signals: list[TradeSignal] = []
 
-        if self.settings.openai_api_key:
+        if self._llm_provider:
             # LLM-based estimation (with TTL-based re-evaluation)
             estimate = self._estimates.get(data.condition_id)
             if estimate and estimate.is_stale:
@@ -159,7 +174,7 @@ class AIAgentStrategy(Strategy):
         side = "BUY_YES" if kf > 0 else "BUY_NO"
         price = data.yes_price if kf > 0 else data.no_price
 
-        source = "llm" if self.settings.openai_api_key else "heuristic"
+        source = "llm" if self._llm_provider else "heuristic"
         logger.info(
             "ai_signal",
             condition_id=data.condition_id[:16],
@@ -287,6 +302,21 @@ class AIAgentStrategy(Strategy):
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
     async def _call_llm(self, data: MarketData) -> Any:
         """Call LLM API with retry for transient failures only."""
+        if self._llm_provider == "openai":
+            return await self._call_openai(data)
+        elif self._llm_provider == "anthropic":
+            return await self._call_anthropic(data)
+        raise RuntimeError(f"Unknown LLM provider: {self._llm_provider}")
+
+    SYSTEM_PROMPT = (
+        "You are a prediction market analyst. Estimate the probability "
+        "that the following event will occur. Respond in JSON format: "
+        '{"probability": <float 0-1>, "confidence": <float 0-1>, '
+        '"reasoning": "<brief explanation>", "sources": ["<source1>"]}'
+    )
+
+    async def _call_openai(self, data: MarketData) -> Any:
+        """Call OpenAI API for probability estimation."""
         if self._openai_client is None:
             from openai import AsyncOpenAI
             self._openai_client = AsyncOpenAI(api_key=self.settings.openai_api_key, timeout=30)
@@ -294,23 +324,64 @@ class AIAgentStrategy(Strategy):
         return await self._openai_client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a prediction market analyst. Estimate the probability "
-                        "that the following event will occur. Respond in JSON format: "
-                        '{"probability": <float 0-1>, "confidence": <float 0-1>, '
-                        '"reasoning": "<brief explanation>", "sources": ["<source1>"]}'
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": f"Market question: {data.question}\nCurrent YES price: {data.yes_price}",
-                },
+                {"role": "system", "content": self.SYSTEM_PROMPT},
+                {"role": "user", "content": f"Market question: {data.question}\nCurrent YES price: {data.yes_price}"},
             ],
             temperature=0.3,
             max_tokens=300,
         )
+
+    async def _call_anthropic(self, data: MarketData) -> Any:
+        """Call Anthropic (Claude) API for probability estimation."""
+        import json as _json
+
+        api_key = getattr(self.settings, 'anthropic_api_key', '')
+        if not api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY not set")
+
+        if self._anthropic_client is None:
+            try:
+                from anthropic import AsyncAnthropic
+                self._anthropic_client = AsyncAnthropic(api_key=api_key, timeout=30)
+            except ImportError:
+                # Fallback to raw HTTP if SDK not available
+                self._anthropic_client = None
+
+        if self._anthropic_client:
+            response = await self._anthropic_client.messages.create(
+                model="claude-sonnet-4-6-20250514",
+                max_tokens=300,
+                system=self.SYSTEM_PROMPT,
+                messages=[
+                    {"role": "user", "content": f"Market question: {data.question}\nCurrent YES price: {data.yes_price}"},
+                ],
+                temperature=0.3,
+            )
+            # Wrap in a compatible format for _estimate_probability
+            return _AnthropicResponse(response)
+        else:
+            # Raw HTTP fallback
+            import httpx
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": "claude-sonnet-4-6-20250514",
+                        "max_tokens": 300,
+                        "system": self.SYSTEM_PROMPT,
+                        "messages": [
+                            {"role": "user", "content": f"Market question: {data.question}\nCurrent YES price: {data.yes_price}"},
+                        ],
+                        "temperature": 0.3,
+                    },
+                )
+                resp.raise_for_status()
+                return _AnthropicHTTPResponse(resp.json())
 
     async def on_fill(self, signal: TradeSignal, fill_price: Decimal, fill_size: Decimal) -> None:
         self._total_pnl += (signal.price - fill_price) * fill_size
@@ -321,3 +392,30 @@ class AIAgentStrategy(Strategy):
             fill_price=str(fill_price),
             fill_size=str(fill_size),
         )
+
+
+class _AnthropicResponse:
+    """Wrapper to make Anthropic SDK response compatible with OpenAI format."""
+
+    def __init__(self, response: Any) -> None:
+        content = response.content[0].text if response.content else "{}"
+        self.choices = [_Choice(_Message(content=content))]
+
+
+class _AnthropicHTTPResponse:
+    """Wrapper for raw HTTP Anthropic response."""
+
+    def __init__(self, data: dict) -> None:
+        blocks = data.get("content", [])
+        text = blocks[0].get("text", "{}") if blocks else "{}"
+        self.choices = [_Choice(_Message(content=text))]
+
+
+class _Choice:
+    def __init__(self, message: "_Message") -> None:
+        self.message = message
+
+
+class _Message:
+    def __init__(self, content: str) -> None:
+        self.content = content
