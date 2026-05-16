@@ -1,4 +1,4 @@
-"""Arbitrage strategy — internal YES+NO, cross-platform, and mean-reversion arb."""
+"""Arbitrage strategy -- internal YES+NO, cross-platform, and mean-reversion arb."""
 
 import time
 import structlog
@@ -11,9 +11,9 @@ from src.core.strategy_base import MarketData, Strategy, TradeSignal
 logger = structlog.get_logger()
 
 ONE_DOLLAR = Decimal("1.0")
-MIN_PROFIT_THRESHOLD = Decimal("0.005")  # 0.5 cents minimum profit per pair
-MIN_MEAN_REVERSION_EDGE = Decimal("0.05")  # 5 cent deviation from fair value
-CROSS_PLATFORM_MIN_GAP = Decimal("0.03")  # 3 cent minimum gap to cover fees
+MIN_PROFIT_THRESHOLD = Decimal("0.005")
+MIN_MEAN_REVERSION_EDGE = Decimal("0.10")  # 10c deviation (tuned: 5c was too noisy on cheap markets)
+CROSS_PLATFORM_MIN_GAP = Decimal("0.03")
 
 
 class ArbitrageStrategy(Strategy):
@@ -21,7 +21,7 @@ class ArbitrageStrategy(Strategy):
 
     1. Internal arb: YES price + NO price < $1.00 on the same market
     2. Cross-platform arb: price gap between Polymarket and Kalshi
-    3. Mean-reversion arb: prices far from 50c that should converge toward fair value
+    3. Mean-reversion arb: prices far from 50c that should converge
     """
 
     def __init__(self, settings: Settings, data_feed: DataFeed) -> None:
@@ -29,10 +29,9 @@ class ArbitrageStrategy(Strategy):
         self.data_feed = data_feed
         self.cross_platform_enabled = bool(settings.kalshi_api_key)
         self._kalshi_prices: dict[str, Decimal] = {}
-        # Mean-reversion state
-        self._seen_markets: dict[str, dict] = {}  # condition_id -> price tracking
+        self._seen_markets: dict[str, dict] = {}
         self._last_signal_time: dict[str, float] = {}
-        self._signal_cooldown: float = 60.0  # Seconds between arb signals per market
+        self._signal_cooldown: float = 60.0
 
     async def start(self) -> None:
         await super().start()
@@ -42,7 +41,6 @@ class ArbitrageStrategy(Strategy):
         if self.state.value != "running":
             return []
 
-        # Cooldown check
         now = time.monotonic()
         last = self._last_signal_time.get(data.condition_id, 0)
         if now - last < self._signal_cooldown:
@@ -50,18 +48,15 @@ class ArbitrageStrategy(Strategy):
 
         signals: list[TradeSignal] = []
 
-        # Internal arbitrage: YES + NO < $1
         internal = self._check_internal_arb(data)
         if internal:
             signals.extend(internal)
 
-        # Mean-reversion arbitrage: prices far from rational expectations
         if not signals:
             mr = self._check_mean_reversion(data)
             if mr:
                 signals.append(mr)
 
-        # Cross-platform arbitrage: Polymarket vs Kalshi
         if not signals and self.cross_platform_enabled:
             cross = self._check_cross_platform_arb(data)
             if cross:
@@ -101,7 +96,7 @@ class ArbitrageStrategy(Strategy):
             profit=str(profit_per_pair),
         )
 
-        size = profit_per_pair * Decimal("10")  # Scale position with edge
+        size = profit_per_pair * Decimal("10")
         return [
             TradeSignal(
                 condition_id=data.condition_id,
@@ -124,14 +119,11 @@ class ArbitrageStrategy(Strategy):
         ]
 
     def _check_mean_reversion(self, data: MarketData) -> TradeSignal | None:
-        """Detect prices that have deviated significantly from 50c fair value.
+        """Detect extreme prices that should mean-revert.
 
-        In prediction markets, extreme prices (very high or very low) often
-        represent overreactions. A price at 0.90+ or 0.10- suggests the
-        market may be overconfident, and mean-reversion arb bets against
-        the extreme by buying the cheap side.
+        Tuned: extreme thresholds 0.03/0.97 (was 0.05/0.95), swing
+        lookback 10 ticks (was 5), edge threshold 10c (was 5c).
         """
-        # Track price history for this market
         cid = data.condition_id
         if cid not in self._seen_markets:
             self._seen_markets[cid] = {"prices": [], "count": 0}
@@ -139,46 +131,38 @@ class ArbitrageStrategy(Strategy):
         market["prices"].append(data.yes_price)
         market["count"] += 1
 
-        # Need at least a few observations to detect extremes
         if market["count"] < 3:
             return None
 
-        # Keep only recent 20 prices
         market["prices"] = market["prices"][-20:]
 
-        # Check for extreme prices — these often mean-revert
-        if data.yes_price >= Decimal("0.95"):
-            # Market is very confident — buy NO (cheap side) betting on reversion
-            size = Decimal("1")  # Small size — mean reversion is speculative
+        if data.yes_price >= Decimal("0.97"):
             return TradeSignal(
                 condition_id=cid,
                 side="BUY_NO",
                 price=data.no_price,
-                size=size,
+                size=Decimal("1"),
                 reason=f"Mean-reversion arb: YES={data.yes_price} seems overpriced",
                 confidence=float(ONE_DOLLAR - data.yes_price),
                 strategy=self.name,
             )
-        elif data.yes_price <= Decimal("0.05"):
-            # Market is very bearish — buy YES (cheap side)
-            size = Decimal("1")
+        elif data.yes_price <= Decimal("0.03"):
             return TradeSignal(
                 condition_id=cid,
                 side="BUY_YES",
                 price=data.yes_price,
-                size=size,
+                size=Decimal("1"),
                 reason=f"Mean-reversion arb: YES={data.yes_price} seems underpriced",
                 confidence=float(data.yes_price),
                 strategy=self.name,
             )
 
-        # Check for large recent swings — price jumped significantly
-        if len(market["prices"]) >= 5:
-            recent = market["prices"][-5:]
+        # 10-tick swing detection with tighter edge threshold
+        if len(market["prices"]) >= 10:
+            recent = market["prices"][-10:]
             avg = sum(recent) / Decimal(str(len(recent)))
             deviation = abs(data.yes_price - avg)
             if deviation >= MIN_MEAN_REVERSION_EDGE:
-                # Price moved a lot recently — bet it reverts toward the average
                 if data.yes_price > avg:
                     side = "BUY_NO"
                     price = data.no_price
@@ -190,7 +174,7 @@ class ArbitrageStrategy(Strategy):
                     side=side,
                     price=price,
                     size=Decimal("1"),
-                    reason=f"Mean-reversion arb: YES={data.yes_price} vs 5-tick avg={avg}, deviation={deviation}",
+                    reason=f"Mean-reversion arb: YES={data.yes_price} vs 10-tick avg={avg:.4f}, deviation={deviation:.4f}",
                     confidence=float(min(deviation / Decimal("0.10"), Decimal("0.7"))),
                     strategy=self.name,
                 )
@@ -204,40 +188,30 @@ class ArbitrageStrategy(Strategy):
             return []
 
         gap = data.yes_price - kalshi_price
-
         if abs(gap) < CROSS_PLATFORM_MIN_GAP:
             return []
 
         signals = []
         if gap > 0:
-            # Polymarket YES is overpriced relative to Kalshi
-            # Sell YES on PM, Buy on Kalshi
-            signals.append(
-                TradeSignal(
-                    condition_id=data.condition_id,
-                    side="SELL_YES",
-                    price=data.yes_price,
-                    size=Decimal("1"),
-                    reason=f"Cross-platform arb: PM YES={data.yes_price} vs Kalshi={kalshi_price}, gap={gap}",
-                    confidence=float(gap),
-                    strategy=self.name,
-                )
-            )
+            signals.append(TradeSignal(
+                condition_id=data.condition_id,
+                side="SELL_YES",
+                price=data.yes_price,
+                size=Decimal("1"),
+                reason=f"Cross-platform arb: PM YES={data.yes_price} vs Kalshi={kalshi_price}, gap={gap}",
+                confidence=float(gap),
+                strategy=self.name,
+            ))
         else:
-            # Polymarket YES is underpriced relative to Kalshi
-            # Buy YES on PM
-            signals.append(
-                TradeSignal(
-                    condition_id=data.condition_id,
-                    side="BUY_YES",
-                    price=data.yes_price,
-                    size=Decimal("1"),
-                    reason=f"Cross-platform arb: PM YES={data.yes_price} vs Kalshi={kalshi_price}, gap={gap}",
-                    confidence=float(abs(gap)),
-                    strategy=self.name,
-                )
-            )
-
+            signals.append(TradeSignal(
+                condition_id=data.condition_id,
+                side="BUY_YES",
+                price=data.yes_price,
+                size=Decimal("1"),
+                reason=f"Cross-platform arb: PM YES={data.yes_price} vs Kalshi={kalshi_price}, gap={gap}",
+                confidence=float(abs(gap)),
+                strategy=self.name,
+            ))
         return signals
 
     def update_kalshi_price(self, condition_id: str, price: Decimal) -> None:

@@ -89,19 +89,19 @@ async def discover_weather_tokens(n: int = 5) -> list[tuple[str, str, str]]:
                         is_weather = True
                         break
 
-        series = event.get("series", "") or event.get("seriesSlug", "")
-        if isinstance(series, list):
-            series = " ".join(str(s) for s in series if s)
-        if isinstance(series, str) and "weather" in series.lower():
-            is_weather = True
+            series = event.get("series", "") or event.get("seriesSlug", "")
+            if isinstance(series, list):
+                series = " ".join(str(s) for s in series if s)
+            if isinstance(series, str) and "weather" in series.lower():
+                is_weather = True
 
-        # Also check event title for weather keywords
-        title = (event.get("title", "") or "").lower()
-        if any(kw in title for kw in WEATHER_KEYWORDS):
-            is_weather = True
+            # Also check event title for weather keywords
+            title = (event.get("title", "") or "").lower()
+            if any(kw in title for kw in WEATHER_KEYWORDS):
+                is_weather = True
 
-        if not is_weather:
-            continue
+            if not is_weather:
+                continue
 
             for market in event.get("markets", []):
                 raw = market.get("clobTokenIds", "[]")

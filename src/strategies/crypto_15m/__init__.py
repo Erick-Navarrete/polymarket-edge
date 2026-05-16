@@ -53,8 +53,8 @@ DEFAULT_WEIGHTS: dict[SignalType, Decimal] = {
 }
 
 # Risk parameters
-MAX_TRADE_USD = Decimal("1")
-STOP_LOSS_PCT = Decimal("30") / Decimal("100")
+MAX_TRADE_USD = Decimal("2")  # $2 max per trade (tuned: was $1, effective spread capture needs slightly larger)
+MAX_CONTRACTS = Decimal("10")  # Never buy more than 10 contracts regardless of price
 TAKE_PROFIT_PCT = Decimal("20") / Decimal("100")
 
 
@@ -73,6 +73,7 @@ class Crypto15mStrategy(Strategy):
     def __init__(self, settings: Settings) -> None:
         super().__init__(name="crypto_15m", settings=settings)
         self._weights = DEFAULT_WEIGHTS.copy()
+        self._min_price: Decimal = Decimal("0.05") # Skip extreme markets
         self._price_history: dict[str, list[Decimal]] = {}  # condition_id -> recent prices
         self._futures_prices: dict[str, Decimal] = {}  # symbol -> current futures price
         self._history_window = 20  # Number of recent prices to keep
@@ -107,13 +108,17 @@ class Crypto15mStrategy(Strategy):
         if mean_rev is not None:
             fused.add_vote(SignalType.MEAN_REVERSION, mean_rev, self._weights[SignalType.MEAN_REVERSION])
 
-        # Generate trade if consensus is strong enough
-        if fused.confidence < 0.3:
+        # Skip cheap markets where position sizing breaks down
+        if data.yes_price < self._min_price or data.yes_price > (Decimal("1") - self._min_price):
+            return []
+
+    # Generate trade if consensus is strong enough
+        if fused.confidence < 0.35:  # Tuned: raised from 0.3 to reduce false signals
             return []
 
         side = "BUY_YES" if fused.consensus > 0 else "BUY_NO"
         price = data.yes_price if side == "BUY_YES" else data.no_price
-        size = MAX_TRADE_USD / price if price > 0 else Decimal("0")
+        size = min(MAX_TRADE_USD / price, MAX_CONTRACTS) if price > 0 else Decimal("0")
 
         return [
             TradeSignal(

@@ -80,6 +80,7 @@ class CopyTradingStrategy(Strategy):
         self._momentum_lookback: int = 5  # Number of ticks to look back
         self._momentum_threshold: Decimal = Decimal("0.03")  # 3% move to trigger
         self._signal_cooldown: float = 30.0  # Seconds between signals per market
+        self._min_price: Decimal = Decimal("0.05")  # Skip extreme markets
 
     def add_target(self, target: CopyTarget) -> None:
         """Add a wallet to track."""
@@ -114,7 +115,7 @@ class CopyTradingStrategy(Strategy):
                     sig = self._follow_target(data, target)
                     if sig:
                         signals.append(sig)
-                        break  # One signal per market tick
+                    break  # One signal per market tick
 
         # Momentum-following: detect sharp price moves (whale activity fingerprint)
         if not signals:
@@ -151,6 +152,9 @@ class CopyTradingStrategy(Strategy):
 
     def _detect_momentum(self, data: MarketData) -> TradeSignal | None:
         """Detect sharp price moves that suggest whale/informed activity."""
+        # Skip very cheap markets where small price changes create misleading % moves
+        if data.yes_price < self._min_price or data.yes_price > (Decimal("1") - self._min_price):
+            return None
         history = self._price_history.get(data.condition_id, [])
         now = time.monotonic()
         history.append((now, data.yes_price))

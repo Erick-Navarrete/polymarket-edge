@@ -113,7 +113,7 @@ async def test_cross_platform_arb(strategy):
 
 @pytest.mark.asyncio
 async def test_mean_reversion_extreme_high(settings, data_feed):
-    """Mean-reversion should buy NO when YES price is extremely high (>=0.95)."""
+    """Mean-reversion should buy NO when YES price is extremely high (>=0.97)."""
     # Use fresh strategy with no cooldown interference
     s = ArbitrageStrategy(settings, data_feed)
     s._signal_cooldown = 0  # Disable cooldown for test
@@ -124,8 +124,8 @@ async def test_mean_reversion_extreme_high(settings, data_feed):
         data = MarketData(
             condition_id="0xextreme1",
             question="Is X certain?",
-            yes_price=Decimal("0.96"),
-            no_price=Decimal("0.04"),
+            yes_price=Decimal("0.98"),
+            no_price=Decimal("0.02"),
             spread=Decimal("0.02"),
             volume_24h=Decimal("1000"),
             timestamp=1000.0,
@@ -140,7 +140,7 @@ async def test_mean_reversion_extreme_high(settings, data_feed):
 
 @pytest.mark.asyncio
 async def test_mean_reversion_extreme_low(settings, data_feed):
-    """Mean-reversion should buy YES when YES price is extremely low (<=0.05)."""
+    """Mean-reversion should buy YES when YES price is extremely low (<=0.03)."""
     s = ArbitrageStrategy(settings, data_feed)
     s._signal_cooldown = 0
     await s.start()
